@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../text/opentype/OpenType.Core.fsproj" />
+    <ProjectReference Include="../text/unicode/src/Unicode/Unicode.Core.fsproj" />
+    <ProjectReference Include="../text/shaper/Shaper.Core.fsproj" />
+    <ProjectReference Include="../text/engine/Text.Engine.fsproj" />
+    <ProjectReference Include="../text/bidi/Bidi.Core.fsproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Types.fs" />
+    <Compile Include="Pcf.fs" />
+    <Compile Include="Text.fs" />
+    <Compile Include="Cmd.fs" />
+    <Compile Include="SvgPath.fs" />
+    <Compile Include="Backend.fs" />
+    <Compile Include="Raster.fs" />
+    <Compile Include="GlInterop.fs" />
+    <Compile Include="GlslCompiler.fs" />
+    <Compile Include="SdfAtlas.fs" />
+    <Compile Include="TextShader.fs" />
+    <Compile Include="GlBackend.fs" />
+    <Compile Include="Dsl.fs" />
+    <Compile Include="Context.fs" />
+    <!-- Demo.fs moved to renderer-demo/ -->
+  </ItemGroup>
+</Project>
