@@ -3132,6 +3132,7 @@ module Raster =
                 | BackdropFilter _ -> "BackdropFilter"
                 | Group3D _ -> "Group3D"
                 | ShaderFill _ -> "ShaderFill"
+                | RetainedGlesLayer _ -> "RetainedGlesLayer"
             let sw = System.Diagnostics.Stopwatch()
             let rec submitOne (m: Matrix3x2) (aaSamples: int) (cmd: Cmd) =
                 match cmd with

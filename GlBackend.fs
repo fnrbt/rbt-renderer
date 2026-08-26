@@ -1523,10 +1523,7 @@ void main() {
                     current <- next
                     targets <- next :: targets
                 | Custom _ ->
-                    // A host-supplied CPU pixel pass — not expressible as a GL shader. Skipped on
-                    // the GL backend (the software rasterizer applies it; headless export uses that
-                    // path). A readback→run→upload fallback for live GL preview is future work.
-                    ()
+                    invalidOp "Custom pixel filters require the software renderer"
                 | Blur radius ->
                     // 6-pass separable box blur (H→V→H→V→H→V) matching software's 3× box blur
                     let hShader = GlslCompiler.buildHBlurShader radius st.W
@@ -1596,8 +1593,6 @@ void main() {
                     // Return early—we already composited to main FBO
                     current <- { Fbo = -1; Texture = 0; StencilRb = 0; Width = 0; Height = 0 }
                     targets <- []
-                | Custom _ ->
-                    invalidOp "Custom pixel filters require the software renderer"
 
             // Final composite: draw result texture to parent FBO with blending
             if current.Fbo <> -1 then
