@@ -1,4 +1,4 @@
-namespace Renderer
+namespace Rbt.Renderer
 
 open System.Collections.Generic
 
@@ -2830,6 +2830,8 @@ module Raster =
                                 match paint' with
                                 | Solid c -> scanlineFill fb contours c NonZero
                                 | _ -> scanlineFillPaint fb contours paint' NonZero
+        | RetainedGlesLayer (bounds, layer) ->
+            layer.SoftwareFallback bounds |> List.iter (dispatchWithTransform fb m)
         | ShaderFill _ -> ()
 
     and dispatchWithTransformAA (fb: Framebuffer) (m: Matrix3x2) (aaSamples: int) (cmd: Cmd) =

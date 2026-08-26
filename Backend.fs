@@ -1,4 +1,4 @@
-namespace Renderer
+namespace Rbt.Renderer
 
 type Backend =
     { Init: int -> int -> unit

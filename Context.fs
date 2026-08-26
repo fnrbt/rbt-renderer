@@ -1,4 +1,4 @@
-namespace Renderer
+namespace Rbt.Renderer
 
 type ContextState =
     { Transform: Matrix3x2

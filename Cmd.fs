@@ -1,4 +1,4 @@
-namespace Renderer
+namespace Rbt.Renderer
 
 type Cmd =
     | Clear of Color
@@ -37,6 +37,24 @@ type Cmd =
     | DrawBorder of rect: Rect * top: BorderSide * right: BorderSide * bottom: BorderSide * left: BorderSide * tl: float<px> * tr: float<px> * br: float<px> * bl: float<px>
     | BackdropFilter of clipPath: PathSeg list * fillRule: FillRule * filters: Filter list * cmds: Cmd list
     | Group3D of xform: Matrix4x4 * opacity: float * cmds: Cmd list
+    /// One retained imperative GLES layer. GL backends invoke it in scene order;
+    /// software backends skip it. The stable layer object owns its GPU resources.
+    | RetainedGlesLayer of bounds: Rect * layer: IGlesLayer
     /// Fill a rect with a custom fragment shader. The quotation must be
     /// `fun (vPos: Gpu.vec2) -> Gpu.vec4` — vPos receives pixel-space coords.
     | ShaderFill of rect: Rect * fragmentShader: Microsoft.FSharp.Quotations.Expr
+
+and GlesLayerFrame =
+    { Bounds: Rect
+      Transform: Matrix3x2
+      Projection: float32[]
+      ViewportWidth: int
+      ViewportHeight: int
+      Framebuffer: int
+      ContextId: nativeint }
+
+and IGlesLayer =
+    abstract Render: GlesLayerFrame -> unit
+    abstract ContextLost: unit -> unit
+    abstract Dispose: unit -> unit
+    abstract SoftwareFallback: bounds:Rect -> Cmd list

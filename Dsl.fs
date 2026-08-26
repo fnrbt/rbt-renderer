@@ -1,4 +1,4 @@
-namespace Renderer
+namespace Rbt.Renderer
 
 // ── V1: Computation Expression ──
 

@@ -1,4 +1,4 @@
-namespace Renderer
+namespace Rbt.Renderer
 
 open System
 open System.Runtime.InteropServices
@@ -674,6 +674,20 @@ void main() {
     and dispatch (st: GlState) (orthoBase: float32[]) (m: Matrix3x2) (softFb: Framebuffer) (cmd: Cmd) =
         let mvp = transformToMat4 m orthoBase
         match cmd with
+        | RetainedGlesLayer (bounds, layer) ->
+            let frame =
+                { Bounds = bounds
+                  Transform = m
+                  Projection = mvp
+                  ViewportWidth = st.W
+                  ViewportHeight = st.H
+                  Framebuffer = st.ActiveFbo
+                  ContextId = st.Egl.Context }
+            try layer.Render frame
+            finally
+                Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
+                Gl.glViewport(0, 0, st.W, st.H)
+                restoreMainState st
         | Clear c ->
             let pm = Color.toPremul c
             Gl.glClearColor(float32 pm.R / 255.0f, float32 pm.G / 255.0f, float32 pm.B / 255.0f, float32 pm.A / 255.0f)
@@ -1314,6 +1328,7 @@ void main() {
                         | Invert f -> Some (GlslCompiler.buildInvertShader f)
                         | HueRotate d -> Some (GlslCompiler.buildHueRotateShader d)
                         | OpacityFilter f -> Some (GlslCompiler.buildOpacityShader f)
+                        | Custom _ -> invalidOp "Custom pixel filters require the software renderer"
                         | _ -> None
                     match shader with
                     | Some s ->
@@ -1581,6 +1596,8 @@ void main() {
                     // Return early—we already composited to main FBO
                     current <- { Fbo = -1; Texture = 0; StencilRb = 0; Width = 0; Height = 0 }
                     targets <- []
+                | Custom _ ->
+                    invalidOp "Custom pixel filters require the software renderer"
 
             // Final composite: draw result texture to parent FBO with blending
             if current.Fbo <> -1 then

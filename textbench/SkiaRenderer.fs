@@ -1,7 +1,7 @@
 module TextBench.SkiaRenderer
 
 open SkiaSharp
-open Renderer
+open Rbt.Renderer
 
 // ── Helpers ──
 

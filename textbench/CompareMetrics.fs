@@ -1,6 +1,6 @@
 module TextBench.CompareMetrics
 
-open Renderer
+open Rbt.Renderer
 
 type CompareResult = {
     TestName: string

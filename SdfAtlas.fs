@@ -1,4 +1,4 @@
-namespace Renderer
+namespace Rbt.Renderer
 
 open System.Collections.Generic
 
@@ -10,20 +10,20 @@ module SdfAtlas =
 
     // ── SDF generation ──
 
-    /// Flatten OpenType PathCmd[] to polyline segments for rasterization.
-    let private flattenOutline (cmds: OpenType.Outline.PathCmd[]) : (float * float) list list =
+    /// Flatten Rbt.OpenType PathCmd[] to polyline segments for rasterization.
+    let private flattenOutline (cmds: Rbt.OpenType.Outline.PathCmd[]) : (float * float) list list =
         let contours = ResizeArray<(float * float) list>()
         let current = ResizeArray<float * float>()
         for cmd in cmds do
             match cmd with
-            | OpenType.Outline.MoveTo (x, y) ->
+            | Rbt.OpenType.Outline.MoveTo (x, y) ->
                 if current.Count > 0 then
                     contours.Add(Seq.toList current)
                     current.Clear()
                 current.Add((x, y))
-            | OpenType.Outline.LineTo (x, y) ->
+            | Rbt.OpenType.Outline.LineTo (x, y) ->
                 current.Add((x, y))
-            | OpenType.Outline.QuadTo (cx, cy, x, y) ->
+            | Rbt.OpenType.Outline.QuadTo (cx, cy, x, y) ->
                 // Subdivide quadratic into line segments
                 let (sx, sy) = if current.Count > 0 then current.[current.Count - 1] else (0.0, 0.0)
                 let n = 8
@@ -33,7 +33,7 @@ module SdfAtlas =
                     let px = it * it * sx + 2.0 * it * t * cx + t * t * x
                     let py = it * it * sy + 2.0 * it * t * cy + t * t * y
                     current.Add((px, py))
-            | OpenType.Outline.CubicTo (cx1, cy1, cx2, cy2, x, y) ->
+            | Rbt.OpenType.Outline.CubicTo (cx1, cy1, cx2, cy2, x, y) ->
                 let (sx, sy) = if current.Count > 0 then current.[current.Count - 1] else (0.0, 0.0)
                 let n = 12
                 for i = 1 to n do
@@ -42,7 +42,7 @@ module SdfAtlas =
                     let px = it*it*it*sx + 3.0*it*it*t*cx1 + 3.0*it*t*t*cx2 + t*t*t*x
                     let py = it*it*it*sy + 3.0*it*it*t*cy1 + 3.0*it*t*t*cy2 + t*t*t*y
                     current.Add((px, py))
-            | OpenType.Outline.Close ->
+            | Rbt.OpenType.Outline.Close ->
                 if current.Count > 0 then
                     contours.Add(Seq.toList current)
                     current.Clear()
@@ -122,7 +122,7 @@ module SdfAtlas =
         match Text.tryOpenTypeFont font with
         | None -> Array.zeroCreate (sdfSize * sdfSize)
         | Some otFont ->
-            let cmds = OpenType.Font.outline otFont glyphId
+            let cmds = Rbt.OpenType.Font.outline otFont glyphId
             if cmds.Length = 0 then Array.zeroCreate (sdfSize * sdfSize)
             else
                 let contours = flattenOutline cmds
@@ -224,11 +224,11 @@ module SdfAtlas =
             // Compute glyph metrics for positioning
             let otFont = Text.tryOpenTypeFont font
             let upm = otFont |> Option.map (fun f -> float f.Head.UnitsPerEm) |> Option.defaultValue 1.0
-            let cmds = otFont |> Option.map (fun f -> OpenType.Font.outline f glyphId) |> Option.defaultValue [||]
+            let cmds = otFont |> Option.map (fun f -> Rbt.OpenType.Font.outline f glyphId) |> Option.defaultValue [||]
             let bx, by, gw, gh =
                 if cmds.Length = 0 then 0.0, 0.0, 0.0, 0.0
                 else
-                    match otFont |> Option.bind (fun f -> OpenType.Font.glyphBBox f glyphId) with
+                    match otFont |> Option.bind (fun f -> Rbt.OpenType.Font.glyphBBox f glyphId) with
                     | Some bbox -> bbox.XMin / upm, bbox.YMin / upm, (bbox.XMax - bbox.XMin) / upm, (bbox.YMax - bbox.YMin) / upm
                     | None -> 0.0, 0.0, 0.0, 0.0
             let entry = { U0 = u0; V0 = v0; U1 = u1; V1 = v1

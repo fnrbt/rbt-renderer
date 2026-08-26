@@ -348,7 +348,7 @@ ignore it and fall back to full-rasterize when:
   rasterize.
 - **Damage rects overlap the scroll viewport** beyond just the strips.
   Means something inside the scrolled region changed independently
-  (e.g., a tooltip appeared while scrolling). Renderer's choice: do
+  (e.g., a tooltip appeared while scrolling). Rbt.Renderer's choice: do
   the BitBlt then add the overlapping rects to the rasterize set, or
   punt to full repaint. Heuristic by area ratio.
 
@@ -390,7 +390,7 @@ The widget code is platform-agnostic. The backend abstracts away
   constructs a `wl_egl_window` from the bound `wl_surface`, hands it to
   `GlBackend.createWindow`, and drives `Submit` / `Present` instead of
   the SHM path. The SHM path stays for fallback / debug.
-- **`widgets/Renderer.fs` or wherever the backend factory lives** —
+- **`widgets/Rbt.Renderer.fs` or wherever the backend factory lives** —
   selection logic: prefer GL window when EGL is available, fall back to
   software SHM.
 

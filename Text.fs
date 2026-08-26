@@ -1,4 +1,4 @@
-namespace Renderer
+namespace Rbt.Renderer
 
 open System
 open System.Collections.Generic
@@ -10,9 +10,9 @@ module Text =
     // ── Types ──
 
     type OutlineFontData = {
-        OtFont: OpenType.Font.Font
-        ShFont: Shaper.Shaper.ParsedFont
-        TextFont: global.Text.Engine.TextFont
+        OtFont: Rbt.OpenType.Font.Font
+        ShFont: Rbt.Shaper.Shaper.ParsedFont
+        TextFont: global.Rbt.Text.Engine.TextFont
     }
 
     type FontFace =
@@ -20,10 +20,10 @@ module Text =
         | BitmapFace of Pcf.Font
 
     type FontData = {
-        // Kept for existing callers that inspect OpenType data directly.
+        // Kept for existing callers that inspect Rbt.OpenType data directly.
         // Bitmap fonts have these as default/null values; use helpers below in renderer code.
-        OtFont: OpenType.Font.Font
-        ShFont: Shaper.Shaper.ParsedFont
+        OtFont: Rbt.OpenType.Font.Font
+        ShFont: Rbt.Shaper.Shaper.ParsedFont
         Face: FontFace
         Id: int
     }
@@ -39,7 +39,7 @@ module Text =
         Font: FontData
         FontSize: float
         Glyphs: PositionedGlyph[]
-        Direction: Shaper.Shaper.TextDirection
+        Direction: Rbt.Shaper.Shaper.TextDirection
     }
 
     type BitmapGlyph = {
@@ -66,15 +66,15 @@ module Text =
         nextFontId <- nextFontId + 1
         id
 
-    let private makeOutlineFont (otFont: OpenType.Font.Font) (shFont: Shaper.Shaper.ParsedFont) =
+    let private makeOutlineFont (otFont: Rbt.OpenType.Font.Font) (shFont: Rbt.Shaper.Shaper.ParsedFont) =
         { OtFont = otFont
           ShFont = shFont
-          Face = OutlineFace { OtFont = otFont; ShFont = shFont; TextFont = global.Text.Engine.createFont shFont }
+          Face = OutlineFace { OtFont = otFont; ShFont = shFont; TextFont = global.Rbt.Text.Engine.createFont shFont }
           Id = allocFontId () }
 
     let private makeBitmapFont (pcfFont: Pcf.Font) =
-        { OtFont = Unchecked.defaultof<OpenType.Font.Font>
-          ShFont = Unchecked.defaultof<Shaper.Shaper.ParsedFont>
+        { OtFont = Unchecked.defaultof<Rbt.OpenType.Font.Font>
+          ShFont = Unchecked.defaultof<Rbt.Shaper.Shaper.ParsedFont>
           Face = BitmapFace pcfFont
           Id = allocFontId () }
 
@@ -88,16 +88,16 @@ module Text =
         | true, cached -> cached
         | _ ->
             // Unwrap WOFF/WOFF2 to raw sfnt once, then feed BOTH parsers the
-            // decompressed bytes. OpenType.Font.load unwraps internally, but
-            // Shaper.parseFont does not — handing it wrapped WOFF made it read the
+            // decompressed bytes. Rbt.OpenType.Font.load unwraps internally, but
+            // Rbt.Shaper.parseFont does not — handing it wrapped WOFF made it read the
             // WOFF header as a table directory and throw KeyNotFoundException on
             // tables.["head"]. Most modern web fonts ship only woff/woff2.
             let sfnt =
-                if OpenType.Woff.isWoff data then OpenType.Woff.decodeWoff data
-                elif OpenType.Woff.isWoff2 data then OpenType.Woff.decodeWoff2 data
+                if Rbt.OpenType.Woff.isWoff data then Rbt.OpenType.Woff.decodeWoff data
+                elif Rbt.OpenType.Woff.isWoff2 data then Rbt.OpenType.Woff.decodeWoff2 data
                 else data
-            let otFont = OpenType.Font.load sfnt
-            let shFont = Shaper.Shaper.parseFont sfnt
+            let otFont = Rbt.OpenType.Font.load sfnt
+            let shFont = Rbt.Shaper.Shaper.parseFont sfnt
             let fd = makeOutlineFont otFont shFont
             fontCache.[hash] <- fd
             fd)
@@ -123,7 +123,7 @@ module Text =
             let data = File.ReadAllBytes(path)
             if Pcf.isPcfData data then loadPcf data else loadFont data
 
-    /// Load a raw CFF (Type1C) font program directly, bypassing OpenType container parsing.
+    /// Load a raw CFF (Type1C) font program directly, bypassing Rbt.OpenType container parsing.
     /// glyphWidths: advance width per glyph in font units (1000 = full em for most CFF).
     /// ascender/descender: font metrics in font units. unitsPerEm: typically 1000 for CFF.
     let loadCff (cffData: byte[]) (glyphWidths: int[]) (ascender: int) (descender: int) (unitsPerEm: int) : FontData =
@@ -132,14 +132,14 @@ module Text =
         match fontCache.TryGetValue(hash) with
         | true, cached -> cached
         | _ ->
-            let cff = OpenType.Cff.parseCff cffData 0
+            let cff = Rbt.OpenType.Cff.parseCff cffData 0
             let numGlyphs = cff.CharStrings.Length
             let hmtx =
                 Array.init numGlyphs (fun i ->
                     let w = if i < glyphWidths.Length then glyphWidths.[i] else 0
-                    { OpenType.Tables.AdvanceWidth = uint16 (max 0 (min 65535 w))
-                      OpenType.Tables.LeftSideBearing = 0s })
-            let otFont : OpenType.Font.Font =
+                    { Rbt.OpenType.Tables.AdvanceWidth = uint16 (max 0 (min 65535 w))
+                      Rbt.OpenType.Tables.LeftSideBearing = 0s })
+            let otFont : Rbt.OpenType.Font.Font =
                 { Data = cffData
                   Head = { UnitsPerEm = unitsPerEm; IndexToLocFormat = 0
                            XMin = 0s; YMin = int16 descender; XMax = int16 unitsPerEm; YMax = int16 ascender }
@@ -148,14 +148,14 @@ module Text =
                            NumberOfHMetrics = numGlyphs }
                   Hmtx = hmtx
                   Vhea = None; Vmtx = None; OS2 = None; Post = None; Names = [||]
-                  CmapSubtable = OpenType.Cmap.Unsupported -1; CmapFormat14 = None
-                  Outlines = OpenType.Font.CffOutlines cff
+                  CmapSubtable = Rbt.OpenType.Cmap.Unsupported -1; CmapFormat14 = None
+                  Outlines = Rbt.OpenType.Font.CffOutlines cff
                   Kern = None; Colr = None; Cpal = None; Svg = None
                   Bitmaps = None; Gdef = None; Gsub = None; Gpos = None
                   Stat = None; Vorg = None; Variation = None }
-            let shFont : Shaper.Shaper.ParsedFont =
+            let shFont : Rbt.Shaper.Shaper.ParsedFont =
                 { Data = cffData
-                  Cmap = Shaper.OpenType.Types.EmptyCmap
+                  Cmap = Rbt.Shaper.OpenType.Types.EmptyCmap
                   GlyphWidths = if glyphWidths.Length >= numGlyphs then glyphWidths
                                 else Array.init numGlyphs (fun i -> if i < glyphWidths.Length then glyphWidths.[i] else 0)
                   UnitsPerEm = unitsPerEm
@@ -174,14 +174,14 @@ module Text =
         match fontCache.TryGetValue(hash) with
         | true, cached -> cached
         | _ ->
-            let t1 = OpenType.Type1.parseType1 data length1 length2
+            let t1 = Rbt.OpenType.Type1.parseType1 data length1 length2
             let numGlyphs = t1.CharStrings.Length
             let hmtx =
                 Array.init numGlyphs (fun i ->
                     let w = if i < glyphWidths.Length then glyphWidths.[i] else 0
-                    { OpenType.Tables.AdvanceWidth = uint16 (max 0 (min 65535 w))
-                      OpenType.Tables.LeftSideBearing = 0s })
-            let otFont : OpenType.Font.Font =
+                    { Rbt.OpenType.Tables.AdvanceWidth = uint16 (max 0 (min 65535 w))
+                      Rbt.OpenType.Tables.LeftSideBearing = 0s })
+            let otFont : Rbt.OpenType.Font.Font =
                 { Data = data
                   Head = { UnitsPerEm = unitsPerEm; IndexToLocFormat = 0
                            XMin = 0s; YMin = int16 descender; XMax = int16 unitsPerEm; YMax = int16 ascender }
@@ -190,14 +190,14 @@ module Text =
                            NumberOfHMetrics = numGlyphs }
                   Hmtx = hmtx
                   Vhea = None; Vmtx = None; OS2 = None; Post = None; Names = [||]
-                  CmapSubtable = OpenType.Cmap.Unsupported -1; CmapFormat14 = None
-                  Outlines = OpenType.Font.Type1Outlines t1
+                  CmapSubtable = Rbt.OpenType.Cmap.Unsupported -1; CmapFormat14 = None
+                  Outlines = Rbt.OpenType.Font.Type1Outlines t1
                   Kern = None; Colr = None; Cpal = None; Svg = None
                   Bitmaps = None; Gdef = None; Gsub = None; Gpos = None
                   Stat = None; Vorg = None; Variation = None }
-            let shFont : Shaper.Shaper.ParsedFont =
+            let shFont : Rbt.Shaper.Shaper.ParsedFont =
                 { Data = data
-                  Cmap = Shaper.OpenType.Types.EmptyCmap
+                  Cmap = Rbt.Shaper.OpenType.Types.EmptyCmap
                   GlyphWidths = if glyphWidths.Length >= numGlyphs then glyphWidths
                                 else Array.init numGlyphs (fun i -> if i < glyphWidths.Length then glyphWidths.[i] else 0)
                   UnitsPerEm = unitsPerEm
@@ -233,7 +233,7 @@ module Text =
     // Dictionary corrupts under that concurrent read+insert.
     let private outlineCache = System.Collections.Concurrent.ConcurrentDictionary<int * int, PathSeg list>()
 
-    /// Convert OpenType PathCmd[] to renderer PathSeg list at normalized scale (font units).
+    /// Convert Rbt.OpenType PathCmd[] to renderer PathSeg list at normalized scale (font units).
     let glyphOutline (font: FontData) (glyphId: int) : PathSeg list =
         match font.Face with
         | BitmapFace _ -> []
@@ -242,19 +242,19 @@ module Text =
             match outlineCache.TryGetValue(key) with
             | true, cached -> cached
             | _ ->
-                let cmds = OpenType.Font.outline outline.OtFont glyphId
+                let cmds = Rbt.OpenType.Font.outline outline.OtFont glyphId
                 let segs =
                     [ for cmd in cmds do
                         match cmd with
-                        | OpenType.Outline.MoveTo (x, y) ->
+                        | Rbt.OpenType.Outline.MoveTo (x, y) ->
                             yield MoveTo (vec2 x (-y))
-                        | OpenType.Outline.LineTo (x, y) ->
+                        | Rbt.OpenType.Outline.LineTo (x, y) ->
                             yield LineTo (vec2 x (-y))
-                        | OpenType.Outline.QuadTo (cx, cy, x, y) ->
+                        | Rbt.OpenType.Outline.QuadTo (cx, cy, x, y) ->
                             yield QuadTo (vec2 cx (-cy), vec2 x (-y))
-                        | OpenType.Outline.CubicTo (cx1, cy1, cx2, cy2, x, y) ->
+                        | Rbt.OpenType.Outline.CubicTo (cx1, cy1, cx2, cy2, x, y) ->
                             yield CubicTo (vec2 cx1 (-cy1), vec2 cx2 (-cy2), vec2 x (-y))
-                        | OpenType.Outline.Close ->
+                        | Rbt.OpenType.Outline.Close ->
                             yield Close ]
                 outlineCache.[key] <- segs
                 segs
@@ -319,22 +319,22 @@ module Text =
 
     let unitsPerEm (font: FontData) : float =
         match font.Face with
-        | OutlineFace outline -> global.Text.Engine.unitsPerEm outline.TextFont
+        | OutlineFace outline -> global.Rbt.Text.Engine.unitsPerEm outline.TextFont
         | BitmapFace pcfFont -> float pcfFont.PixelSize
 
     let ascender (font: FontData) (fontSize: float) : float =
         match font.Face with
-        | OutlineFace outline -> global.Text.Engine.ascender outline.TextFont fontSize
+        | OutlineFace outline -> global.Rbt.Text.Engine.ascender outline.TextFont fontSize
         | BitmapFace pcfFont -> float pcfFont.Ascender * fontSize / unitsPerEm font
 
     let descender (font: FontData) (fontSize: float) : float =
         match font.Face with
-        | OutlineFace outline -> global.Text.Engine.descender outline.TextFont fontSize
+        | OutlineFace outline -> global.Rbt.Text.Engine.descender outline.TextFont fontSize
         | BitmapFace pcfFont -> -float pcfFont.Descender * fontSize / unitsPerEm font
 
     let lineHeight (font: FontData) (fontSize: float) : float =
         match font.Face with
-        | OutlineFace outline -> global.Text.Engine.lineHeight outline.TextFont fontSize
+        | OutlineFace outline -> global.Rbt.Text.Engine.lineHeight outline.TextFont fontSize
         | BitmapFace pcfFont ->
             float (pcfFont.Ascender + pcfFont.Descender) * fontSize / unitsPerEm font
 
@@ -388,7 +388,7 @@ module Text =
     let hasGlyph (font: FontData) (codepoint: int) : bool =
         match font.Face with
         | OutlineFace outline ->
-            Shaper.OpenType.Types.CmapLookup.lookup outline.ShFont.Cmap codepoint <> 0
+            Rbt.Shaper.OpenType.Types.CmapLookup.lookup outline.ShFont.Cmap codepoint <> 0
         | BitmapFace pcfFont ->
             Pcf.hasGlyph pcfFont codepoint
 
@@ -397,16 +397,16 @@ module Text =
     let private layoutCache = Dictionary<int * string, GlyphRun list>()
     let private layoutCacheMaxEntries = 512
 
-    let private runDirection (run: Bidi.Types.DirectionalRun) =
+    let private runDirection (run: Rbt.Bidi.Types.DirectionalRun) =
         match run.RunDirection with
-        | Bidi.Types.LTR -> Shaper.Shaper.LeftToRight
-        | Bidi.Types.RTL -> Shaper.Shaper.RightToLeft
+        | Rbt.Bidi.Types.LTR -> Rbt.Shaper.Shaper.LeftToRight
+        | Rbt.Bidi.Types.RTL -> Rbt.Shaper.Shaper.RightToLeft
 
     let private layoutCodepoints (font: FontData) (fontSize: float) (codepoints: int[]) dir cursorX =
         match font.Face with
         | OutlineFace outline ->
             let scale = fontSize / unitsPerEm font
-            let shaped = Shaper.Shaper.shapeCodepoints outline.ShFont Shaper.Shaper.ShaperConfig.defaults codepoints dir
+            let shaped = Rbt.Shaper.Shaper.shapeCodepoints outline.ShFont Rbt.Shaper.Shaper.ShaperConfig.defaults codepoints dir
             let glyphs =
                 let mutable x = cursorX
                 [| for sg in shaped.Glyphs do
@@ -455,7 +455,7 @@ module Text =
         | [] -> []
         | _ when String.IsNullOrEmpty text -> []
         | _ ->
-            let paragraph = Bidi.Algorithm.resolveParagraph text
+            let paragraph = Rbt.Bidi.Algorithm.resolveParagraph text
             let mutable cursorX = 0.0
             let output = ResizeArray<GlyphRun>()
 
@@ -499,7 +499,7 @@ module Text =
     // correct answer to reproduce. What we observed via Chrome canvas.measureText is
     // that monospace advances land on whole pixels (e.g. Lilex 0.6em = 9.12px @15.2 → 9).
     //
-    // The underlying real mechanism is TrueType/OpenType HINTING (grid-fitting): the
+    // The underlying real mechanism is TrueType/Rbt.OpenType HINTING (grid-fitting): the
     // font's bytecode snaps glyph outlines — including advances — to the pixel grid at
     // the rasterized size. That is per-glyph and size-dependent, NOT a simple round().
     // We don't run a hinter, so we approximate it ONLY where the approximation holds:
@@ -561,7 +561,7 @@ module Text =
         let runs =
             match font.Face with
             | OutlineFace outline ->
-                global.Text.Engine.layout outline.TextFont fontSize text
+                global.Rbt.Text.Engine.layout outline.TextFont fontSize text
                 |> List.map (fun run ->
                     { Font = font
                       FontSize = run.FontSize
@@ -599,4 +599,4 @@ module Text =
     let clearCaches () =
         lock loadLock (fun () -> fontCache.Clear())
         outlineCache.Clear()
-        global.Text.Engine.clearCaches()
+        global.Rbt.Text.Engine.clearCaches()

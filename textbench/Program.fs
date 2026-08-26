@@ -2,7 +2,7 @@ module TextBench.Program
 
 open System
 open System.IO
-open Renderer
+open Rbt.Renderer
 open TextBench.CompareMetrics
 
 // ── PPM writer (same as Demo.writePpm) ──
@@ -64,8 +64,8 @@ let complexCases = [
 ]
 
 let bidiCases = [
-    { Name = "bidi_mixed";    Category = "Bidi"; Text = "Hello مرحبا World";  FontSizes = [24.0; 48.0] }
-    { Name = "bidi_hebrew";   Category = "Bidi"; Text = "abc 123 דגה xyz";    FontSizes = [24.0; 48.0] }
+    { Name = "bidi_mixed";    Category = "Rbt.Bidi"; Text = "Hello مرحبا World";  FontSizes = [24.0; 48.0] }
+    { Name = "bidi_hebrew";   Category = "Rbt.Bidi"; Text = "abc 123 דגה xyz";    FontSizes = [24.0; 48.0] }
 ]
 
 let verticalCases = [
@@ -266,7 +266,7 @@ let main argv =
     printfn "  Ours: %.2f ms  Skia: %.2f ms  Ratio: %.1fx" sizeOur sizeSkia (sizeOur / sizeSkia)
 
     // ── 4. Unique strings: every render is a shaping cache miss ──
-    //    Outlines still cached (ASCII glyph reuse), but Bidi+shaping runs
+    //    Outlines still cached (ASCII glyph reuse), but Rbt.Bidi+shaping runs
     //    fresh each time. Shows shaping overhead vs Skia's internal shaper.
     printfn ""
     printfn "--- 4. Unique Strings (shaping cache miss every time) ---"
