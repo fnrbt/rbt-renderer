@@ -2,8 +2,10 @@ namespace Rbt.Renderer
 
 open System
 open System.Collections.Generic
+#if !FABLE_COMPILER
 open System.IO
 open System.IO.Compression
+#endif
 open System.Text
 
 module Pcf =
@@ -110,13 +112,18 @@ module Pcf =
         while stop < limit && data.[stop] <> 0uy do
             stop <- stop + 1
         if start >= 0 && stop >= start && stop <= data.Length then
+#if FABLE_COMPILER
+            Encoding.UTF8.GetString(Array.sub data start (stop - start))
+#else
             Encoding.ASCII.GetString(data, start, stop - start)
+#endif
         else
             ""
 
     let isPcfData (data: byte[]) =
         data.Length >= 8 && readU32LE data 0 = pcfMagic
 
+#if !FABLE_COMPILER
     let private readPossiblyGzipFile (path: string) =
         let raw = File.ReadAllBytes path
         if raw.Length >= 2 && raw.[0] = 0x1fuy && raw.[1] = 0x8buy then
@@ -127,6 +134,7 @@ module Pcf =
             output.ToArray()
         else
             raw
+#endif
 
     let private tables (data: byte[]) =
         if not (isPcfData data) then
@@ -426,8 +434,10 @@ module Pcf =
           Properties = properties
           Name = tryString "FONT" properties }
 
+#if !FABLE_COMPILER
     let loadFile (path: string) : Font =
         readPossiblyGzipFile path |> load
+#endif
 
     let hasGlyph (font: Font) (codepoint: int) =
         font.Encoding.ContainsKey codepoint

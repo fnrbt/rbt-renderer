@@ -1,10 +1,14 @@
 namespace Rbt.Renderer
 
 open System
+#if !FABLE_COMPILER
 open System.Buffers
 open System.Runtime.InteropServices
+#endif
 
+#if !FABLE_COMPILER
 #nowarn "3391" // implicit Memory -> ReadOnlyMemory conversion
+#endif
 
 [<AutoOpen>]
 module Types =
@@ -83,6 +87,20 @@ module Types =
                 let out_ag = (src_ag + ((dst_ag * inv + 0x00800080u) >>> 8)) &&& 0x00FF00FFu
                 out_rb ||| (out_ag <<< 8)
 
+#if FABLE_COMPILER
+    type Framebuffer = { W: int; H: int; Px: uint32[] }
+
+    module Framebuffer =
+        let create w h (c: Color) =
+            let arr = Array.create (w * h) (Pixel.fromColorPremul c)
+            { W = w; H = h; Px = arr }
+
+        let ofArray (px: uint32[]) (w: int) (h: int) : Framebuffer =
+            { W = w; H = h; Px = px }
+
+        let tryGetArray (fb: Framebuffer) : uint32[] option =
+            Some fb.Px
+#else
     /// MemoryManager wrapping a native pointer as Memory<'T>.
     #nowarn "9"
     type UnmanagedMemoryManager<'T when 'T : unmanaged>(ptr: nativeint, length: int) =
@@ -106,6 +124,9 @@ module Types =
             let mgr = new UnmanagedMemoryManager<uint32>(ptr, w * h)
             { W = w; H = h; Px = mgr.Memory }
 
+        let ofArray (px: uint32[]) (w: int) (h: int) : Framebuffer =
+            { W = w; H = h; Px = Memory(px) }
+
         /// Get the underlying array (only for array-backed framebuffers)
         let tryGetArray (fb: Framebuffer) : uint32[] option =
             let mutable seg = ArraySegment<uint32>()
@@ -113,6 +134,7 @@ module Types =
             if MemoryMarshal.TryGetArray(rom, &seg) && seg.Offset = 0 then
                 Some seg.Array
             else None
+#endif
 
     let (|Inside|Outside|) (p: Vec2, r: Rect) =
         if p.X >= r.Pos.X && p.X < r.Pos.X + r.Size.X &&

@@ -37,6 +37,7 @@ type Cmd =
     | DrawBorder of rect: Rect * top: BorderSide * right: BorderSide * bottom: BorderSide * left: BorderSide * tl: float<px> * tr: float<px> * br: float<px> * bl: float<px>
     | BackdropFilter of clipPath: PathSeg list * fillRule: FillRule * filters: Filter list * cmds: Cmd list
     | Group3D of xform: Matrix4x4 * opacity: float * cmds: Cmd list
+#if !FABLE_COMPILER
     /// One retained imperative GLES layer. GL backends invoke it in scene order;
     /// software backends skip it. The stable layer object owns its GPU resources.
     | RetainedGlesLayer of bounds: Rect * layer: IGlesLayer
@@ -58,3 +59,4 @@ and IGlesLayer =
     abstract ContextLost: unit -> unit
     abstract Dispose: unit -> unit
     abstract SoftwareFallback: bounds:Rect -> Cmd list
+#endif

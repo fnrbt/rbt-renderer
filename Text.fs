@@ -2,8 +2,10 @@ namespace Rbt.Renderer
 
 open System
 open System.Collections.Generic
+#if !FABLE_COMPILER
 open System.IO
 open System.Runtime.CompilerServices
+#endif
 
 module Text =
 
@@ -79,7 +81,13 @@ module Text =
           Id = allocFontId () }
 
     let private cacheKey tag (data: byte[]) =
-        HashCode.Combine(tag, data.GetHashCode())
+#if FABLE_COMPILER
+        (tag * 31) ^^^ LanguagePrimitives.PhysicalHash data
+#else
+        // data.GetHashCode() is reference-based on byte[] (both net10.0 and netstandard2.0),
+        // which is the intended identity-cache semantics here.
+        (tag * 31) ^^^ data.GetHashCode()
+#endif
 
     let loadFont (data: byte[]) : FontData =
       lock loadLock (fun () ->
@@ -112,6 +120,7 @@ module Text =
             fontCache.[hash] <- fd
             fd)
 
+#if !FABLE_COMPILER
     let loadPcfFile (path: string) : FontData =
         Pcf.loadFile path |> makeBitmapFont
 
@@ -122,6 +131,7 @@ module Text =
         else
             let data = File.ReadAllBytes(path)
             if Pcf.isPcfData data then loadPcf data else loadFont data
+#endif
 
     /// Load a raw CFF (Type1C) font program directly, bypassing Rbt.OpenType container parsing.
     /// glyphWidths: advance width per glyph in font units (1000 = full em for most CFF).
@@ -228,10 +238,14 @@ module Text =
 
     // ── Outline conversion + cache ──
 
+#if FABLE_COMPILER
+    let private outlineCache = Dictionary<int * int, PathSeg list>()
+#else
     // Concurrent: the compositor renders on the event-loop thread while the
     // test-control / screenshot path can render on its own thread; a plain
     // Dictionary corrupts under that concurrent read+insert.
     let private outlineCache = System.Collections.Concurrent.ConcurrentDictionary<int * int, PathSeg list>()
+#endif
 
     /// Convert Rbt.OpenType PathCmd[] to renderer PathSeg list at normalized scale (font units).
     let glyphOutline (font: FontData) (glyphId: int) : PathSeg list =
@@ -521,6 +535,24 @@ module Text =
     //
     // Monospace is detected from the font's glyph widths (one advance dominating ⇒
     // monospace), cached per font.
+#if FABLE_COMPILER
+    let private monoFontCache = Dictionary<int, bool>()
+    let private isMonospaceFont (font: FontData) : bool =
+        match monoFontCache.TryGetValue(font.Id) with
+        | true, v -> v
+        | _ ->
+            let v =
+                match font.Face with
+                | OutlineFace o ->
+                    let ws = o.ShFont.GlyphWidths |> Array.filter (fun w -> w > 0)
+                    if ws.Length < 2 then false
+                    else
+                        let (_, topCount) = ws |> Array.countBy id |> Array.maxBy snd
+                        float topCount / float ws.Length >= 0.9
+                | BitmapFace _ -> true
+            monoFontCache.[font.Id] <- v
+            v
+#else
     // Concurrent so the parallel render loop (one frame per thread) can populate it on a cold
     // cache without racing — the factory is pure, so an occasional duplicate computation under
     // contention is harmless (same value, stored once).
@@ -537,6 +569,7 @@ module Text =
                     let (_, topCount) = ws |> Array.countBy id |> Array.maxBy snd
                     float topCount / float ws.Length >= 0.9
             | BitmapFace _ -> true)
+#endif
 
     let private roundRunAdvances (runs: GlyphRun list) : GlyphRun list =
         let mutable origPen = 0.0
@@ -599,4 +632,5 @@ module Text =
     let clearCaches () =
         lock loadLock (fun () -> fontCache.Clear())
         outlineCache.Clear()
+        monoFontCache.Clear()
         global.Rbt.Text.Engine.clearCaches()

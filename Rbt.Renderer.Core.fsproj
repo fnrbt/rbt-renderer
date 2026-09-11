@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0;net10.0</TargetFrameworks>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../rbt-text/opentype/Rbt.OpenType.Core.fsproj" />
+    <ProjectReference Include="../rbt-text/unicode/src/Rbt.Unicode/Rbt.Unicode.Core.fsproj" />
+    <ProjectReference Include="../rbt-text/shaper/Rbt.Shaper.Core.fsproj" />
+    <ProjectReference Include="../rbt-text/bidi/Rbt.Bidi.Core.fsproj" />
+    <ProjectReference Include="../rbt-text/engine/Rbt.Text.Engine.fsproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Types.fs" />
+    <Compile Include="Pcf.fs" />
+    <Compile Include="Text.fs" />
+    <Compile Include="Cmd.fs" />
+  </ItemGroup>
+</Project>
