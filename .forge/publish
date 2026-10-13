@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Build and publish Rbt.Renderer.Core to the Forge registry.
+"""Build and publish Rbt.Renderer.Core and Rbt.Renderer to the Forge registry.
 
 Runs inside the Forge publish-action shell as the sole checkout. The rbt-text
-libraries become PackageReferences under ForgePublish=true and restore through
-the sandbox gateway. The package carries its F# sources under fable/ and the
-default font under assets/, so Fable web builds (rbt-pdf's viewer) can use it
-from the package alone.
+libraries are PackageReferences and restore through the sandbox gateway. Rbt.Renderer.Core carries its F# sources under fable/ and
+the default font under assets/, so Fable web builds (rbt-pdf's viewer) can use
+it from the package alone. Rbt.Renderer is the whole renderer, for native hosts.
 
 The coordinator injects FORGE_PACKAGE_SOURCE (registry v3 index URL) and
 FORGE_PACKAGE_API_KEYS (JSON prefix->token map). FORGE_VERSION comes from the
@@ -28,6 +27,7 @@ from pathlib import Path
 # (publisher prefix, project), in dependency order.
 PROJECTS = [
     ("Rbt.Renderer.Core", "Rbt.Renderer.Core.fsproj"),
+    ("Rbt.Renderer", "Rbt.Renderer.fsproj"),
 ]
 
 
@@ -111,7 +111,6 @@ def main() -> int:
                 f"-p:RepositoryCommit={source_sha}",
                 "-p:ContinuousIntegrationBuild=true",
                 "-p:IncludeSymbols=false",
-                "-p:ForgePublish=true",
                 "-o", str(output),
             ],
             cwd=repo,

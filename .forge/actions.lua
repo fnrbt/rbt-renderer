@@ -18,6 +18,7 @@ return {
                 },
                 publish = {
                     { registry = "41021897", ecosystem = "nuget", mode = "explicit", prefix = "Rbt.Renderer.Core" },
+                    { registry = "41021897", ecosystem = "nuget", mode = "explicit", prefix = "Rbt.Renderer" },
                 },
             },
         }

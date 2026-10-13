@@ -5,20 +5,11 @@
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
     <PackageReference Include="System.Memory" Version="4.5.5" />
   </ItemGroup>
-  <!-- Development builds use the sibling rbt-text checkout. A Forge publish
-       (ForgePublish=true) has only this repository, so the text libraries
-       come from the package registry. -->
-  <ItemGroup Condition="'$(ForgePublish)' != 'true'">
-    <ProjectReference Include="../rbt-text/opentype/Rbt.OpenType.Core.fsproj" />
-    <ProjectReference Include="../rbt-text/unicode/src/Rbt.Unicode/Rbt.Unicode.Core.fsproj" />
-    <ProjectReference Include="../rbt-text/shaper/Rbt.Shaper.Core.fsproj" />
-    <ProjectReference Include="../rbt-text/bidi/Rbt.Bidi.Core.fsproj" />
-    <ProjectReference Include="../rbt-text/engine/Rbt.Text.Engine.fsproj" />
-  </ItemGroup>
+  <!-- The rbt-text libraries come from the package registry. -->
   <PropertyGroup>
     <RbtTextPackageVersion Condition="'$(RbtTextPackageVersion)' == ''">0.1.5</RbtTextPackageVersion>
   </PropertyGroup>
-  <ItemGroup Condition="'$(ForgePublish)' == 'true'">
+  <ItemGroup>
     <PackageReference Include="Rbt.OpenType.Core" Version="$(RbtTextPackageVersion)" />
     <PackageReference Include="Rbt.Unicode.Core" Version="$(RbtTextPackageVersion)" />
     <PackageReference Include="Rbt.Shaper.Core" Version="$(RbtTextPackageVersion)" />
