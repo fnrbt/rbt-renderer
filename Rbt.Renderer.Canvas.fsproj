@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <FSharpCoreImplicitPackageVersion>10.1.403</FSharpCoreImplicitPackageVersion>
-    <RbtRendererCorePackageVersion Condition="'$(RbtRendererCorePackageVersion)' == ''">0.1.7</RbtRendererCorePackageVersion>
+    <RbtRendererCorePackageVersion Condition="'$(RbtRendererCorePackageVersion)' == ''">0.1.8</RbtRendererCorePackageVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Rbt.Renderer.Core" Version="$(RbtRendererCorePackageVersion)" />

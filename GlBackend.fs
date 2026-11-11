@@ -819,9 +819,15 @@ void main() {
                 drawFullscreenQuad opacityShader target.Texture 0
                 releaseFbo st.FboPool target
                 restoreMainState st
+        | TransparencyGroup _
         | ColorManagedGroup _ ->
-            invalidOp "GlBackend: color-managed transparency groups require the raster backend"
-        | TransparencyGroup (isolated, knockout, opacity, mode, maskCmds, children) ->
+            let conversion, isolated, knockout, opacity, mode, maskCmds, children =
+                match cmd with
+                | TransparencyGroup (isolated, knockout, opacity, mode, maskCmds, children) ->
+                    None, isolated, knockout, opacity, mode, maskCmds, children
+                | ColorManagedGroup (conversion, isolated, knockout, opacity, mode, maskCmds, children) ->
+                    Some conversion, isolated, knockout, opacity, mode, maskCmds, children
+                | _ -> failwith "Expected a transparency group"
             if opacity > 0.0 && not children.IsEmpty then
                 // Keep the unmodified parent backdrop throughout object composition.
                 // In particular, a nonisolated group cannot be rendered on transparent
@@ -852,9 +858,22 @@ void main() {
                         deleteTexture texture
                         restoreMainState st
                     softFbHasPixels <- false
+                // The parent stays in its own working space. Only nonisolated
+                // groups need a converted, immutable copy for object composition
+                // and subsequent source extraction.
+                let groupBackdrop =
+                    match conversion with
+                    | Some value when not isolated ->
+                        let converted = Framebuffer.create st.W st.H (Color.rgba 0uy 0uy 0uy 0uy)
+                        let parentPixels = backdrop.Px.Span
+                        let groupPixels = converted.Px.Span
+                        for i = 0 to backdrop.Px.Length - 1 do
+                            groupPixels.[i] <- Raster.convertTransparencyPixel value.ToGroup parentPixels.[i]
+                        converted
+                    | _ -> backdrop
 
                 let group = Framebuffer.create st.W st.H (if isolated then Color.rgba 0uy 0uy 0uy 0uy else Color.black)
-                if not isolated then backdrop.Px.Span.CopyTo(group.Px.Span)
+                if not isolated then groupBackdrop.Px.Span.CopyTo(group.Px.Span)
                 let alpha =
                     if isolated && not knockout then group
                     else Framebuffer.create st.W st.H (Color.rgba 0uy 0uy 0uy 0uy)
@@ -927,12 +946,12 @@ void main() {
                                         value
                                 if knockout then
                                     if isolated then candidateFb.Px.Span.Clear()
-                                    else backdrop.Px.Span.CopyTo(candidateFb.Px.Span)
+                                    else groupBackdrop.Px.Span.CopyTo(candidateFb.Px.Span)
                                 else group.Px.Span.CopyTo(candidateFb.Px.Span)
                                 renderOnBackdrop obj candidateFb
-                                Raster.accumulateTransparencyCandidate group alpha backdrop candidateFb source shape isolated
+                                Raster.accumulateTransparencyCandidate group alpha groupBackdrop candidateFb source shape isolated
                             else
-                                Raster.accumulateTransparencyObject group alpha backdrop source shape isolated objectMode
+                                Raster.accumulateTransparencyObject group alpha groupBackdrop source shape isolated objectMode
                 let mask =
                     match maskCmds with
                     | Some commands ->
@@ -941,7 +960,7 @@ void main() {
                         renderObject commands maskFb
                         Some maskFb
                     | None -> None
-                Raster.finishTransparencyGroup backdrop group alpha mask isolated opacity mode None backdrop
+                Raster.finishTransparencyGroup backdrop group alpha mask isolated opacity mode conversion groupBackdrop
                 // Replace the parent with its original backdrop plus exactly one
                 // group composite (not one composite per child).
                 Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)

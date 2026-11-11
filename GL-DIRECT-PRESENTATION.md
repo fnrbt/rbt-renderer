@@ -73,7 +73,7 @@ the original PDF transparency fixture also matches in the Chromium worker.
 `ColorManagedGroup` adds explicit `ColorSpaceConversion.ToGroup`/`ToParent`
 callbacks on normalized straight RGB components. Child paints already contain
 the group's encoded components; ICC/PDF interpretation remains outside Renderer.
-Raster and Canvas convert the initial backdrop into group space, extract the
+Raster, Canvas and GL convert the initial backdrop into group space, extract the
 group-only contribution there, then convert that contribution into parent space
 before boundary blend mode, opacity and mask. Untouched parent pixels do not
 make a color-space round trip. Ordinary `TransparencyGroup` inherits its
@@ -82,15 +82,21 @@ parent's working space.
 Packed source-over uses exact rounded division by 255 in both channel pairs;
 the former division-by-256 approximation could reduce opaque alpha to 254.
 
-Transparency groups on GL currently use CPU readback/compositing and upload;
-they are not a zero-readback direct-presentation path. GL explicitly rejects
-`ColorManagedGroup` and custom pixel filters, including consumer-defined
+Transparency groups on GL use CPU readback/compositing and upload, including
+`ColorManagedGroup`; they are not a zero-readback direct-presentation path.
+GL still explicitly rejects custom pixel filters, including consumer-defined
 luminosity/transfer masks; use Raster or Canvas for those commands.
 Knockout shape extraction is approximate for expanding
 filters, text represented as masks and intrinsic image alpha.
 
-Verification for this change covers native raster pixels and Chromium Canvas,
-plus GL compilation. A live EGL rendering comparison has not been performed.
+Verification covers native raster pixels, Chromium Canvas and 11 live EGL cases
+on Mesa llvmpipe (OpenGL ES 3.2): isolation/knockout combinations, opacity,
+boundary Multiply, mask plus opacity, zero opacity, nested managed/unmanaged
+groups, clipping and following-paint state restoration. GL pixels match the
+independent expectations and raster probes within two channel values. This is
+software Mesa execution, not hardware-GPU verification. No supported paint
+currently reaches the deferred software-paint fallback, so that path was not
+claimed as exercised.
 
 ## Why the current shape wastes work
 
