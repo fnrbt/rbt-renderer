@@ -1004,6 +1004,22 @@ void main() {
                     let invDa = 1.0f - da in let invSa = 1.0f - sa
                     mkVec4 (invDa * src.x + invSa * dst.x + sa * da * br) (invDa * src.y + invSa * dst.y + sa * da * bg) (invDa * src.z + invSa * dst.z + sa * da * bb) oa @>
             |> compilePostProcess
+        | HardLight ->
+            compilePostProcessFrag
+                <@ fun (uv: vec2) ->
+                    let src = GpuMath.texture2D 0 uv
+                    let dst = GpuMath.texture2D 1 uv
+                    let sa = GpuMath.max' src.w 0.000001f
+                    let da = GpuMath.max' dst.w 0.000001f
+                    let cs_r = src.x / sa in let cs_g = src.y / sa in let cs_b = src.z / sa
+                    let cd_r = dst.x / da in let cd_g = dst.y / da in let cd_b = dst.z / da
+                    let br = if cs_r <= 0.5f then 2.0f * cs_r * cd_r else 1.0f - 2.0f * (1.0f - cs_r) * (1.0f - cd_r)
+                    let bg = if cs_g <= 0.5f then 2.0f * cs_g * cd_g else 1.0f - 2.0f * (1.0f - cs_g) * (1.0f - cd_g)
+                    let bb = if cs_b <= 0.5f then 2.0f * cs_b * cd_b else 1.0f - 2.0f * (1.0f - cs_b) * (1.0f - cd_b)
+                    let oa = sa + da * (1.0f - sa)
+                    let invDa = 1.0f - da in let invSa = 1.0f - sa
+                    mkVec4 (invDa * src.x + invSa * dst.x + sa * da * br) (invDa * src.y + invSa * dst.y + sa * da * bg) (invDa * src.z + invSa * dst.z + sa * da * bb) oa @>
+            |> compilePostProcess
         | Darken ->
             compilePostProcessFrag
                 <@ fun (uv: vec2) ->
@@ -1041,9 +1057,9 @@ void main() {
                     let da = GpuMath.max' dst.w 0.000001f
                     let cs_r = src.x / sa in let cs_g = src.y / sa in let cs_b = src.z / sa
                     let cd_r = dst.x / da in let cd_g = dst.y / da in let cd_b = dst.z / da
-                    let br = (if cs_r >= 1.0f then 1.0f elif cd_r < 0.000001f then 0.0f else GpuMath.min' 1.0f (cd_r / (1.0f - cs_r)))
-                    let bg = (if cs_g >= 1.0f then 1.0f elif cd_g < 0.000001f then 0.0f else GpuMath.min' 1.0f (cd_g / (1.0f - cs_g)))
-                    let bb = (if cs_b >= 1.0f then 1.0f elif cd_b < 0.000001f then 0.0f else GpuMath.min' 1.0f (cd_b / (1.0f - cs_b)))
+                    let br = (if cd_r <= 0.0f then 0.0f elif cs_r >= 1.0f then 1.0f else GpuMath.min' 1.0f (cd_r / (1.0f - cs_r)))
+                    let bg = (if cd_g <= 0.0f then 0.0f elif cs_g >= 1.0f then 1.0f else GpuMath.min' 1.0f (cd_g / (1.0f - cs_g)))
+                    let bb = (if cd_b <= 0.0f then 0.0f elif cs_b >= 1.0f then 1.0f else GpuMath.min' 1.0f (cd_b / (1.0f - cs_b)))
                     let oa = sa + da * (1.0f - sa)
                     let invDa = 1.0f - da in let invSa = 1.0f - sa
                     mkVec4 (invDa * src.x + invSa * dst.x + sa * da * br) (invDa * src.y + invSa * dst.y + sa * da * bg) (invDa * src.z + invSa * dst.z + sa * da * bb) oa @>
@@ -1057,9 +1073,9 @@ void main() {
                     let da = GpuMath.max' dst.w 0.000001f
                     let cs_r = src.x / sa in let cs_g = src.y / sa in let cs_b = src.z / sa
                     let cd_r = dst.x / da in let cd_g = dst.y / da in let cd_b = dst.z / da
-                    let br = (if cs_r < 0.000001f then 0.0f elif cd_r >= 1.0f then 1.0f else 1.0f - GpuMath.min' 1.0f ((1.0f - cd_r) / cs_r))
-                    let bg = (if cs_g < 0.000001f then 0.0f elif cd_g >= 1.0f then 1.0f else 1.0f - GpuMath.min' 1.0f ((1.0f - cd_g) / cs_g))
-                    let bb = (if cs_b < 0.000001f then 0.0f elif cd_b >= 1.0f then 1.0f else 1.0f - GpuMath.min' 1.0f ((1.0f - cd_b) / cs_b))
+                    let br = (if cd_r >= 1.0f then 1.0f elif cs_r <= 0.0f then 0.0f else 1.0f - GpuMath.min' 1.0f ((1.0f - cd_r) / cs_r))
+                    let bg = (if cd_g >= 1.0f then 1.0f elif cs_g <= 0.0f then 0.0f else 1.0f - GpuMath.min' 1.0f ((1.0f - cd_g) / cs_g))
+                    let bb = (if cd_b >= 1.0f then 1.0f elif cs_b <= 0.0f then 0.0f else 1.0f - GpuMath.min' 1.0f ((1.0f - cd_b) / cs_b))
                     let oa = sa + da * (1.0f - sa)
                     let invDa = 1.0f - da in let invSa = 1.0f - sa
                     mkVec4 (invDa * src.x + invSa * dst.x + sa * da * br) (invDa * src.y + invSa * dst.y + sa * da * bg) (invDa * src.z + invSa * dst.z + sa * da * bb) oa @>
@@ -1073,9 +1089,12 @@ void main() {
                     let da = GpuMath.max' dst.w 0.000001f
                     let cs_r = src.x / sa in let cs_g = src.y / sa in let cs_b = src.z / sa
                     let cd_r = dst.x / da in let cd_g = dst.y / da in let cd_b = dst.z / da
-                    let br = (if cs_r <= 0.5f then cd_r - (1.0f - 2.0f * cs_r) * cd_r * (1.0f - cd_r) else cd_r + (2.0f * cs_r - 1.0f) * (GpuMath.sqrt' cd_r - cd_r))
-                    let bg = (if cs_g <= 0.5f then cd_g - (1.0f - 2.0f * cs_g) * cd_g * (1.0f - cd_g) else cd_g + (2.0f * cs_g - 1.0f) * (GpuMath.sqrt' cd_g - cd_g))
-                    let bb = (if cs_b <= 0.5f then cd_b - (1.0f - 2.0f * cs_b) * cd_b * (1.0f - cd_b) else cd_b + (2.0f * cs_b - 1.0f) * (GpuMath.sqrt' cd_b - cd_b))
+                    let d_r = (if cd_r <= 0.25f then ((16.0f * cd_r - 12.0f) * cd_r + 4.0f) * cd_r else GpuMath.sqrt' cd_r)
+                    let d_g = (if cd_g <= 0.25f then ((16.0f * cd_g - 12.0f) * cd_g + 4.0f) * cd_g else GpuMath.sqrt' cd_g)
+                    let d_b = (if cd_b <= 0.25f then ((16.0f * cd_b - 12.0f) * cd_b + 4.0f) * cd_b else GpuMath.sqrt' cd_b)
+                    let br = (if cs_r <= 0.5f then cd_r - (1.0f - 2.0f * cs_r) * cd_r * (1.0f - cd_r) else cd_r + (2.0f * cs_r - 1.0f) * (d_r - cd_r))
+                    let bg = (if cs_g <= 0.5f then cd_g - (1.0f - 2.0f * cs_g) * cd_g * (1.0f - cd_g) else cd_g + (2.0f * cs_g - 1.0f) * (d_g - cd_g))
+                    let bb = (if cs_b <= 0.5f then cd_b - (1.0f - 2.0f * cs_b) * cd_b * (1.0f - cd_b) else cd_b + (2.0f * cs_b - 1.0f) * (d_b - cd_b))
                     let oa = sa + da * (1.0f - sa)
                     let invDa = 1.0f - da in let invSa = 1.0f - sa
                     mkVec4 (invDa * src.x + invSa * dst.x + sa * da * br) (invDa * src.y + invSa * dst.y + sa * da * bg) (invDa * src.z + invSa * dst.z + sa * da * bb) oa @>
@@ -1111,7 +1130,7 @@ void main() {
                     mkVec4 (invDa * src.x + invSa * dst.x + sa * da * br) (invDa * src.y + invSa * dst.y + sa * da * bg) (invDa * src.z + invSa * dst.z + sa * da * bb) oa @>
             |> compilePostProcess
 
-        // HSL blend modes: compiled from quotations with let-defined helper functions
+        // PDF SetSat/SetLum blend modes: sorting RGB components is not HSL.
         | Hue ->
             compilePostProcessFrag
                 <@ fun (uv: vec2) ->
@@ -1125,37 +1144,23 @@ void main() {
                     let setLum (c: vec3) (l: float32) =
                         let d = l - hslLum c
                         clipColor (c + mkVec3s d)
-                    let hue2rgb (p: float32) (q: float32) (t: float32) =
-                        let t1 = t + (if t < 0.0f then 1.0f else 0.0f)
-                        let t2 = t1 - (if t1 > 1.0f then 1.0f else 0.0f)
-                        (if t2 < 1.0f / 6.0f then p + (q - p) * 6.0f * t2
-                         elif t2 < 0.5f then q
-                         elif t2 < 2.0f / 3.0f then p + (q - p) * (2.0f / 3.0f - t2) * 6.0f
-                         else p)
-                    let rgbToHsl (c: vec3) =
-                        let mx = GpuMath.max' c.x (GpuMath.max' c.y c.z)
-                        let mn = GpuMath.min' c.x (GpuMath.min' c.y c.z)
-                        let d = mx - mn
-                        let l = (mx + mn) * 0.5f
-                        let s = (if l <= 0.5f then d / (GpuMath.max' (mx + mn) 0.00001f) else d / (GpuMath.max' (2.0f - mx - mn) 0.00001f))
-                        let h = (if mx = c.x then (c.y - c.z) / (GpuMath.max' d 0.00001f) + (if c.y < c.z then 6.0f else 0.0f)
-                                 elif mx = c.y then (c.z - c.x) / (GpuMath.max' d 0.00001f) + 2.0f
-                                 else (c.x - c.y) / (GpuMath.max' d 0.00001f) + 4.0f)
-                        (if d < 0.00001f then mkVec3 0.0f 0.0f l else mkVec3 (h / 6.0f) s l)
-                    let hslToRgb (hsl: vec3) =
-                        let q = (if hsl.z < 0.5f then hsl.z * (1.0f + hsl.y) else hsl.z + hsl.y - hsl.z * hsl.y)
-                        let p = 2.0f * hsl.z - q
-                        (if hsl.y < 0.00001f then mkVec3s hsl.z
-                         else mkVec3 (hue2rgb p q (hsl.x + 1.0f / 3.0f)) (hue2rgb p q hsl.x) (hue2rgb p q (hsl.x - 1.0f / 3.0f)))
+                    let sat (c: vec3) = GpuMath.max' c.x (GpuMath.max' c.y c.z) - GpuMath.min' c.x (GpuMath.min' c.y c.z)
+                    let setSat (c: vec3) (s: float32) =
+                        let lo = GpuMath.min' c.x (GpuMath.min' c.y c.z)
+                        let hi = GpuMath.max' c.x (GpuMath.max' c.y c.z)
+                        let mid = c.x + c.y + c.z - lo - hi
+                        let middle = (mid - lo) * s / GpuMath.max' (hi - lo) 0.000001f
+                        (if hi <= lo then mkVec3s 0.0f
+                         else mkVec3 (if c.x >= hi then s elif c.x <= lo then 0.0f else middle)
+                                     (if c.y >= hi then s elif c.y <= lo then 0.0f else middle)
+                                     (if c.z >= hi then s elif c.z <= lo then 0.0f else middle))
                     let src = GpuMath.texture2D 0 uv
                     let dst = GpuMath.texture2D 1 uv
                     let sa = GpuMath.max' src.w 0.000001f
                     let da = GpuMath.max' dst.w 0.000001f
                     let cs = mkVec3 (src.x / sa) (src.y / sa) (src.z / sa)
                     let cd = mkVec3 (dst.x / da) (dst.y / da) (dst.z / da)
-                    let hsS = rgbToHsl cs
-                    let hsD = rgbToHsl cd
-                    let br = setLum (hslToRgb (mkVec3 hsS.x hsD.y hsD.z)) (hslLum cd)
+                    let br = setLum (setSat cs (sat cd)) (hslLum cd)
                     let oa = sa + da * (1.0f - sa)
                     let invDa = 1.0f - da in let invSa = 1.0f - sa
                     mkVec4 (invDa * src.x + invSa * dst.x + sa * da * br.x) (invDa * src.y + invSa * dst.y + sa * da * br.y) (invDa * src.z + invSa * dst.z + sa * da * br.z) oa @>
@@ -1173,37 +1178,23 @@ void main() {
                     let setLum (c: vec3) (l: float32) =
                         let d = l - hslLum c
                         clipColor (c + mkVec3s d)
-                    let hue2rgb (p: float32) (q: float32) (t: float32) =
-                        let t1 = t + (if t < 0.0f then 1.0f else 0.0f)
-                        let t2 = t1 - (if t1 > 1.0f then 1.0f else 0.0f)
-                        (if t2 < 1.0f / 6.0f then p + (q - p) * 6.0f * t2
-                         elif t2 < 0.5f then q
-                         elif t2 < 2.0f / 3.0f then p + (q - p) * (2.0f / 3.0f - t2) * 6.0f
-                         else p)
-                    let rgbToHsl (c: vec3) =
-                        let mx = GpuMath.max' c.x (GpuMath.max' c.y c.z)
-                        let mn = GpuMath.min' c.x (GpuMath.min' c.y c.z)
-                        let d = mx - mn
-                        let l = (mx + mn) * 0.5f
-                        let s = (if l <= 0.5f then d / (GpuMath.max' (mx + mn) 0.00001f) else d / (GpuMath.max' (2.0f - mx - mn) 0.00001f))
-                        let h = (if mx = c.x then (c.y - c.z) / (GpuMath.max' d 0.00001f) + (if c.y < c.z then 6.0f else 0.0f)
-                                 elif mx = c.y then (c.z - c.x) / (GpuMath.max' d 0.00001f) + 2.0f
-                                 else (c.x - c.y) / (GpuMath.max' d 0.00001f) + 4.0f)
-                        (if d < 0.00001f then mkVec3 0.0f 0.0f l else mkVec3 (h / 6.0f) s l)
-                    let hslToRgb (hsl: vec3) =
-                        let q = (if hsl.z < 0.5f then hsl.z * (1.0f + hsl.y) else hsl.z + hsl.y - hsl.z * hsl.y)
-                        let p = 2.0f * hsl.z - q
-                        (if hsl.y < 0.00001f then mkVec3s hsl.z
-                         else mkVec3 (hue2rgb p q (hsl.x + 1.0f / 3.0f)) (hue2rgb p q hsl.x) (hue2rgb p q (hsl.x - 1.0f / 3.0f)))
+                    let sat (c: vec3) = GpuMath.max' c.x (GpuMath.max' c.y c.z) - GpuMath.min' c.x (GpuMath.min' c.y c.z)
+                    let setSat (c: vec3) (s: float32) =
+                        let lo = GpuMath.min' c.x (GpuMath.min' c.y c.z)
+                        let hi = GpuMath.max' c.x (GpuMath.max' c.y c.z)
+                        let mid = c.x + c.y + c.z - lo - hi
+                        let middle = (mid - lo) * s / GpuMath.max' (hi - lo) 0.000001f
+                        (if hi <= lo then mkVec3s 0.0f
+                         else mkVec3 (if c.x >= hi then s elif c.x <= lo then 0.0f else middle)
+                                     (if c.y >= hi then s elif c.y <= lo then 0.0f else middle)
+                                     (if c.z >= hi then s elif c.z <= lo then 0.0f else middle))
                     let src = GpuMath.texture2D 0 uv
                     let dst = GpuMath.texture2D 1 uv
                     let sa = GpuMath.max' src.w 0.000001f
                     let da = GpuMath.max' dst.w 0.000001f
                     let cs = mkVec3 (src.x / sa) (src.y / sa) (src.z / sa)
                     let cd = mkVec3 (dst.x / da) (dst.y / da) (dst.z / da)
-                    let hsS = rgbToHsl cs
-                    let hsD = rgbToHsl cd
-                    let br = setLum (hslToRgb (mkVec3 hsD.x hsS.y hsD.z)) (hslLum cd)
+                    let br = setLum (setSat cd (sat cs)) (hslLum cd)
                     let oa = sa + da * (1.0f - sa)
                     let invDa = 1.0f - da in let invSa = 1.0f - sa
                     mkVec4 (invDa * src.x + invSa * dst.x + sa * da * br.x) (invDa * src.y + invSa * dst.y + sa * da * br.y) (invDa * src.z + invSa * dst.z + sa * da * br.z) oa @>

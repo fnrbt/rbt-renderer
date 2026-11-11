@@ -32,6 +32,7 @@ from pathlib import Path
 PROJECTS = [
     ("Rbt.Renderer.Core", "Rbt.Renderer.Core.fsproj"),
     ("Rbt.Renderer", "Rbt.Renderer.fsproj"),
+    ("Rbt.Renderer.Canvas", "Rbt.Renderer.Canvas.fsproj"),
 ]
 
 
@@ -103,11 +104,9 @@ def main() -> int:
     build_tmp.mkdir()
     environment = dict(os.environ, TMPDIR=str(build_tmp), TMP=str(build_tmp), TEMP=str(build_tmp))
 
-    # A project's in-repo references are built from source and become package
-    # dependencies at the same version, published by their own actions.
-    endpoint = publish_endpoint(source)
-    for index, (prefix, project) in enumerate(selected):
-        output = workdir / f"nupkg-{index}"
+    # Canvas consumes Core as a package. Build its same-tag dependency locally
+    # rather than racing the independent Core publishing action.
+    def pack(project: str, output: Path, extra: list[str] | None = None) -> None:
         run(
             [
                 "dotnet", "pack", project,
@@ -116,13 +115,24 @@ def main() -> int:
                 f"-p:Version={version}",
                 f"-p:PackageVersion={version}",
                 f"-p:RepositoryCommit={source_sha}",
+                f"-p:RbtRendererCorePackageVersion={version}",
                 "-p:ContinuousIntegrationBuild=true",
                 "-p:IncludeSymbols=false",
                 "-o", str(output),
-            ],
+            ] + (extra or []),
             cwd=repo,
             env=environment,
         )
+
+    endpoint = publish_endpoint(source)
+    for index, (prefix, project) in enumerate(selected):
+        output = workdir / f"nupkg-{index}"
+        extra = []
+        if prefix == "Rbt.Renderer.Canvas":
+            dependencies = workdir / "canvas-dependencies"
+            pack("Rbt.Renderer.Core.fsproj", dependencies)
+            extra.append(f"-p:RestoreAdditionalProjectSources={dependencies}")
+        pack(project, output, extra)
         packages = sorted(path for path in output.glob("*.nupkg") if ".symbols." not in path.name)
         if len(packages) != 1:
             fail(f"expected one package from {project}, produced {[path.name for path in packages]}")

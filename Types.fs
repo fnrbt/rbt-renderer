@@ -227,7 +227,7 @@ module Types =
         | Normal | Multiply | Screen | Overlay
         | SrcIn | SrcOut | DstOver | DstAtop | Xor
         | Darken | Lighten | ColorDodge | ColorBurn
-        | SoftLight | Difference | Exclusion
+        | HardLight | SoftLight | Difference | Exclusion
         | Hue | Saturation | ColorMode | Luminosity
 
     /// A direct pixel pass over a w×h premultiplied-BGRA framebuffer: it receives the pixel

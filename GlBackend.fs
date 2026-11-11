@@ -654,6 +654,43 @@ void main() {
                     atlas.Dirty <- true
                     Some entry
 
+    /// Read an offscreen object into premultiplied software pixels. Group
+    /// accumulation uses the same per-pixel equations as the raster backend;
+    /// drawing the objects themselves still uses the GL command dispatcher.
+    let private readTransparencyPixels (fb: Framebuffer) (bytes: byte[]) =
+        let handle = GCHandle.Alloc(bytes, GCHandleType.Pinned)
+        try Gl.glReadPixels(0, 0, fb.W, fb.H, Gl.GL_RGBA, Gl.GL_UNSIGNED_BYTE, handle.AddrOfPinnedObject())
+        finally handle.Free()
+        let pixels = fb.Px.Span
+        for y = 0 to fb.H - 1 do
+            let row = (fb.H - 1 - y) * fb.W * 4
+            for x = 0 to fb.W - 1 do
+                let offset = row + x * 4
+                pixels.[y * fb.W + x] <- Pixel.pack bytes.[offset + 2] bytes.[offset + 1] bytes.[offset] bytes.[offset + 3]
+    let private uploadTransparencyPixels (fb: Framebuffer) (bytes: byte[]) =
+        let pixels = fb.Px.Span
+        for y = 0 to fb.H - 1 do
+            let row = (fb.H - 1 - y) * fb.W * 4
+            for x = 0 to fb.W - 1 do
+                let px = pixels.[y * fb.W + x]
+                let offset = row + x * 4
+                bytes.[offset] <- Pixel.r px
+                bytes.[offset + 1] <- Pixel.g px
+                bytes.[offset + 2] <- Pixel.b px
+                bytes.[offset + 3] <- Pixel.a px
+        let mutable texture = 0
+        Gl.glGenTextures(1, &texture)
+        Gl.glBindTexture(Gl.GL_TEXTURE_2D, texture)
+        let handle = GCHandle.Alloc(bytes, GCHandleType.Pinned)
+        try Gl.glTexImage2D(Gl.GL_TEXTURE_2D, 0, Gl.GL_RGBA, fb.W, fb.H, 0, Gl.GL_RGBA, Gl.GL_UNSIGNED_BYTE, handle.AddrOfPinnedObject())
+        finally handle.Free()
+        Gl.glTexParameteri(Gl.GL_TEXTURE_2D, Gl.GL_TEXTURE_MIN_FILTER, Gl.GL_NEAREST)
+        Gl.glTexParameteri(Gl.GL_TEXTURE_2D, Gl.GL_TEXTURE_MAG_FILTER, Gl.GL_NEAREST)
+        Gl.glTexParameteri(Gl.GL_TEXTURE_2D, Gl.GL_TEXTURE_WRAP_S, Gl.GL_CLAMP_TO_EDGE)
+        Gl.glTexParameteri(Gl.GL_TEXTURE_2D, Gl.GL_TEXTURE_WRAP_T, Gl.GL_CLAMP_TO_EDGE)
+        texture
+
+
     let rec renderToOffscreen (st: GlState) (orthoBase: float32[]) (m: Matrix3x2) (softFb: Framebuffer) (cmds: Cmd list) (w: int) (h: int) : OffscreenTarget =
         let savedFbo = st.ActiveFbo
         let target = acquireFbo st.FboPool
@@ -758,19 +795,14 @@ void main() {
                 softwareFallback st cmd m softFb
 
         | StrokePath (segs, style) ->
-            match solidColor style.Paint with
-            | Some c ->
-                let contours = Raster.flattenPath segs
-                strokeContours st contours (float style.Width) c mvp
-            | None ->
-                let contours = Raster.flattenPath segs
-                let allOutline = ResizeArray<PathSeg>()
-                for contour in contours do
-                    let dashed = Raster.dashPolyline contour (style.DashArray |> List.map float) (float style.DashOffset)
-                    for sub in dashed do allOutline.AddRange(Raster.expandStroke sub style)
-                let outlineContours = Raster.flattenPath (Seq.toList allOutline)
-                if not (stencilFillContoursWithPaint st outlineContours EvenOdd style.Paint mvp) then
-                    softwareFallback st cmd m softFb
+            let contours = Raster.flattenStrokePath segs
+            let allOutline = ResizeArray<PathSeg>()
+            for contour, closed in contours do
+                let dashed = Raster.strokeDashes contour closed (style.DashArray |> List.map float) (float style.DashOffset)
+                for sub, subClosed in dashed do allOutline.AddRange(Raster.expandStroke sub subClosed style)
+            let outlineContours = Raster.flattenPath (Seq.toList allOutline)
+            if not (stencilFillContoursWithPaint st outlineContours EvenOdd style.Paint mvp) then
+                softwareFallback st cmd m softFb
 
         | Group (xform, opacity, children) ->
             if opacity < 1.0 / 255.0 then () else
@@ -786,6 +818,92 @@ void main() {
                 drawFullscreenQuad opacityShader target.Texture 0
                 releaseFbo st.FboPool target
                 restoreMainState st
+        | TransparencyGroup (isolated, knockout, opacity, mode, maskCmds, children) ->
+            if opacity > 0.0 && not children.IsEmpty then
+                // Keep the unmodified parent backdrop throughout object composition.
+                // In particular, a nonisolated group cannot be rendered on transparent
+                // and subsequently blended onto the parent's changed framebuffer.
+                Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
+                let pixels = Array.zeroCreate<byte> (st.W * st.H * 4)
+                let backdrop = Framebuffer.create st.W st.H Color.black
+                readTransparencyPixels backdrop pixels
+                let clipActive = Gl.glIsEnabled(Gl.GL_STENCIL_TEST) <> 0uy
+                // A preceding software-fallback draw is logically part of this
+                // group's initial backdrop, even though the GL backend normally
+                // defers those pixels until Finish. Flush it before processing
+                // objects so ordering and nonisolation remain correct.
+                if softFbHasPixels then
+                    let pending = softFb.Px.Span
+                    let backdropPx = backdrop.Px.Span
+                    let mutable anyPending = false
+                    for i = 0 to softFb.Px.Length - 1 do
+                        if Pixel.a pending.[i] > 0uy then
+                            backdropPx.[i] <- Raster.blendPx pending.[i] backdropPx.[i]
+                            anyPending <- true
+                    if anyPending then
+                        pending.Clear()
+                        Gl.glDisable(Gl.GL_STENCIL_TEST)
+                        Gl.glDisable(Gl.GL_BLEND)
+                        let texture = uploadTransparencyPixels backdrop pixels
+                        drawFullscreenQuad (GlslCompiler.buildPassthroughShader ()) texture 0
+                        deleteTexture texture
+                        restoreMainState st
+                    softFbHasPixels <- false
+
+                let group = Framebuffer.create st.W st.H (if isolated then Color.rgba 0uy 0uy 0uy 0uy else Color.black)
+                if not isolated then backdrop.Px.Span.CopyTo(group.Px.Span)
+                let alpha = Framebuffer.create st.W st.H (Color.rgba 0uy 0uy 0uy 0uy)
+                let source = Framebuffer.create st.W st.H (Color.rgba 0uy 0uy 0uy 0uy)
+                let shape =
+                    if knockout then Some (Framebuffer.create st.W st.H (Color.rgba 0uy 0uy 0uy 0uy))
+                    else None
+                let scratch = Framebuffer.create st.W st.H (Color.rgba 0uy 0uy 0uy 0uy)
+                // The parent clip stencil belongs to the parent FBO; offscreen
+                // children must begin with an independent, empty stencil.
+                Gl.glDisable(Gl.GL_STENCIL_TEST)
+                let renderObject commands destination =
+                    scratch.Px.Span.Clear()
+                    let target = renderToOffscreen st orthoBase m scratch commands st.W st.H
+                    Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, target.Fbo)
+                    readTransparencyPixels destination pixels
+                    let dest = destination.Px.Span
+                    let fallback = scratch.Px.Span
+                    for i = 0 to destination.Px.Length - 1 do
+                        if Pixel.a fallback.[i] > 0uy then
+                            dest.[i] <- Raster.blendPx fallback.[i] dest.[i]
+                    releaseFbo st.FboPool target
+                    Gl.glDisable(Gl.GL_STENCIL_TEST)
+                    restoreMainState st
+                for child in children do
+                    for obj in Raster.transparencyObjects child do
+                        let sourceCmd, objectMode = Raster.transparencyObjectBlend obj
+                        renderObject [sourceCmd] source
+                        match shape with
+                        | Some shapeFb -> renderObject [Raster.transparencyShapeCmd obj] shapeFb
+                        | None -> ()
+                        Raster.accumulateTransparencyObject group alpha backdrop source shape isolated objectMode
+                let mask =
+                    match maskCmds with
+                    | Some commands ->
+                        let maskFb = Framebuffer.create st.W st.H (Color.rgba 0uy 0uy 0uy 0uy)
+                        // Mask commands form a single transparency image.
+                        renderObject commands maskFb
+                        Some maskFb
+                    | None -> None
+                Raster.finishTransparencyGroup backdrop group alpha mask isolated opacity mode
+                // Replace the parent with its original backdrop plus exactly one
+                // group composite (not one composite per child).
+                Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
+                if clipActive then
+                    Gl.glEnable(Gl.GL_STENCIL_TEST)
+                    Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
+                    Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_KEEP)
+                let texture = uploadTransparencyPixels backdrop pixels
+                Gl.glDisable(Gl.GL_BLEND)
+                drawFullscreenQuad (GlslCompiler.buildPassthroughShader ()) texture 0
+                deleteTexture texture
+                restoreMainState st
+
 
         | FillRoundedRect (r, cr, c) ->
             // Build path with ArcTo segments, flatten, stencil fill
@@ -821,19 +939,14 @@ void main() {
                   LineTo (vec2 x0 (y0 + cr))
                   ArcTo (cr * 1.0<px>, cr * 1.0<px>, 0.0, false, true, vec2 (x0 + cr) y0)
                   Close ]
-            match solidColor style.Paint with
-            | Some c ->
-                let contours = Raster.flattenPath segs
-                strokeContours st contours (float style.Width) c mvp
-            | None ->
-                let contours = Raster.flattenPath segs
-                let allOutline = ResizeArray<PathSeg>()
-                for contour in contours do
-                    let dashed = Raster.dashPolyline contour (style.DashArray |> List.map float) (float style.DashOffset)
-                    for sub in dashed do allOutline.AddRange(Raster.expandStroke sub style)
-                let outlineContours = Raster.flattenPath (Seq.toList allOutline)
-                if not (stencilFillContoursWithPaint st outlineContours EvenOdd style.Paint mvp) then
-                    softwareFallback st cmd m softFb
+            let contours = Raster.flattenStrokePath segs
+            let allOutline = ResizeArray<PathSeg>()
+            for contour, closed in contours do
+                let dashed = Raster.strokeDashes contour closed (style.DashArray |> List.map float) (float style.DashOffset)
+                for sub, subClosed in dashed do allOutline.AddRange(Raster.expandStroke sub subClosed style)
+            let outlineContours = Raster.flattenPath (Seq.toList allOutline)
+            if not (stencilFillContoursWithPaint st outlineContours EvenOdd style.Paint mvp) then
+                softwareFallback st cmd m softFb
 
         | FillRoundedRect4 (r, tl, tr, br, bl, c) ->
             let segs = Raster.roundedRectPath4 r tl tr br bl
@@ -842,19 +955,14 @@ void main() {
 
         | StrokeRoundedRect4 (r, tl, tr, br, bl, style) ->
             let segs = Raster.roundedRectPath4 r tl tr br bl
-            match solidColor style.Paint with
-            | Some c ->
-                let contours = Raster.flattenPath segs
-                strokeContours st contours (float style.Width) c mvp
-            | None ->
-                let contours = Raster.flattenPath segs
-                let allOutline = ResizeArray<PathSeg>()
-                for contour in contours do
-                    let dashed = Raster.dashPolyline contour (style.DashArray |> List.map float) (float style.DashOffset)
-                    for sub in dashed do allOutline.AddRange(Raster.expandStroke sub style)
-                let outlineContours = Raster.flattenPath (Seq.toList allOutline)
-                if not (stencilFillContoursWithPaint st outlineContours EvenOdd style.Paint mvp) then
-                    softwareFallback st cmd m softFb
+            let contours = Raster.flattenStrokePath segs
+            let allOutline = ResizeArray<PathSeg>()
+            for contour, closed in contours do
+                let dashed = Raster.strokeDashes contour closed (style.DashArray |> List.map float) (float style.DashOffset)
+                for sub, subClosed in dashed do allOutline.AddRange(Raster.expandStroke sub subClosed style)
+            let outlineContours = Raster.flattenPath (Seq.toList allOutline)
+            if not (stencilFillContoursWithPaint st outlineContours EvenOdd style.Paint mvp) then
+                softwareFallback st cmd m softFb
 
         | DrawImage (src, srcRect, dstRect, smooth) ->
             let tex = getOrUploadTexture st src
@@ -1677,11 +1785,11 @@ void main() {
             restoreMainState st
 
         | StrokeToFill (segs, style, paint, fillRule) ->
-            let contours = Raster.flattenPath segs
+            let contours = Raster.flattenStrokePath segs
             let allOutline = ResizeArray<PathSeg>()
-            for contour in contours do
-                let dashed = Raster.dashPolyline contour (style.DashArray |> List.map float) (float style.DashOffset)
-                for sub in dashed do allOutline.AddRange(Raster.expandStroke sub style)
+            for contour, closed in contours do
+                let dashed = Raster.strokeDashes contour closed (style.DashArray |> List.map float) (float style.DashOffset)
+                for sub, subClosed in dashed do allOutline.AddRange(Raster.expandStroke sub subClosed style)
             let outlineContours = Raster.flattenPath (Seq.toList allOutline)
             if not (stencilFillContoursWithPaint st outlineContours fillRule paint mvp) then
                 softwareFallback st cmd m softFb

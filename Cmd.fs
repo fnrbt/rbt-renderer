@@ -10,6 +10,9 @@ type Cmd =
     | FillPath of PathSeg list * Paint * FillRule
     | StrokePath of PathSeg list * StrokeStyle
     | Group of xform: Matrix3x2 * opacity: float * cmds: Cmd list
+    /// Composite children as independent objects, then composite the group once.
+    /// The optional mask modulates the group's contribution, not its backdrop.
+    | TransparencyGroup of isolated: bool * knockout: bool * opacity: float * mode: BlendMode * mask: Cmd list option * cmds: Cmd list
     | Clip of clipPath: PathSeg list * fillRule: FillRule * cmds: Cmd list
     | Filtered of filters: Filter list * cmds: Cmd list
     | FillRoundedRect of Rect * cornerRadius: float<px> * Color

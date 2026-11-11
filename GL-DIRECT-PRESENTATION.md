@@ -44,6 +44,26 @@ the pixels via `XShmPutImage` / `wl_buffer.attach`.
 So today: GL exists but only the composit project consumes it; widget
 windows are entirely software.
 
+## Shared compositing and Canvas backend
+
+`Rbt.Renderer.Canvas` supplies the reusable Fable Canvas backend, glyph/image
+caches and worker-safe canvas API. It references `Rbt.Renderer.Core`, not PDF
+types. Image placement, premultiplied paint sampling, the standard blend modes
+and isolated/non-isolated knockout groups belong here rather than in consumers.
+
+Raster and GL stroke expansion preserve explicit `Close`: coincident endpoints
+on an open path retain their caps; a closed path joins the seam. GL uses the
+shared stroke outlines for solid and non-solid paints.
+
+Transparency groups on GL currently use CPU readback/compositing and upload;
+they are not a zero-readback direct-presentation path. GL rejects custom pixel
+filters, including consumer-defined luminosity/transfer masks. Raster and Canvas
+support those filters. Knockout shape extraction is approximate for expanding
+filters, text represented as masks and intrinsic image alpha.
+
+Verification for this change covers native raster pixels and Chromium Canvas,
+plus GL compilation. A live EGL rendering comparison has not been performed.
+
 ## Why the current shape wastes work
 
 For a live window, every frame does:

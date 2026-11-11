@@ -23,10 +23,11 @@ end
 return {
     select = function(ctx)
         if string.match(ctx.ref_name, "^refs/tags/v%d+%.%d+%.%d+") then
-            return { "publish-core", "publish" }
+            return { "publish-core", "publish", "publish-canvas" }
         end
         return {}
     end,
     ["publish-core"] = package("Rbt.Renderer.Core"),
     ["publish"] = package("Rbt.Renderer"),
+    ["publish-canvas"] = package("Rbt.Renderer.Canvas"),
 }

@@ -96,6 +96,18 @@ module Raster =
     let setLum (r: float) (g: float) (b: float) (l: float) =
         let d = l - hslLum r g b
         clipColor (r + d) (g + d) (b + d)
+    /// PDF nonseparable blending uses SetSat on RGB components, not an HSL
+    /// hue/saturation conversion (which shifts the intermediate luminance).
+    let setSat (r: float) (g: float) (b: float) (sat: float) =
+        let lo = min r (min g b)
+        let hi = max r (max g b)
+        if hi <= lo then (0.0, 0.0, 0.0)
+        else
+            let mid = r + g + b - lo - hi
+            let middle = (mid - lo) * sat / (hi - lo)
+            let channel c = if c >= hi then sat elif c <= lo then 0.0 else middle
+            (channel r, channel g, channel b)
+
 
     let blendWithMode (mode: BlendMode) (srcPx: uint32) (dstPx: uint32) : uint32 =
         // Both src and dst are in premultiplied alpha space
@@ -148,14 +160,10 @@ module Raster =
                         let (br, bg, bb) =
                             match mode with
                             | Hue ->
-                                let (hs, _, _) = rgbToHsl cs_r cs_g cs_b
-                                let (_, sd, _) = rgbToHsl cd_r cd_g cd_b
-                                let (r, g, b) = hslToRgb hs sd (hslLum cd_r cd_g cd_b)
+                                let (r, g, b) = setSat cs_r cs_g cs_b (hslSat cd_r cd_g cd_b)
                                 setLum r g b (hslLum cd_r cd_g cd_b)
                             | Saturation ->
-                                let (_, ss, _) = rgbToHsl cs_r cs_g cs_b
-                                let (hd, _, _) = rgbToHsl cd_r cd_g cd_b
-                                let (r, g, b) = hslToRgb hd ss (hslLum cd_r cd_g cd_b)
+                                let (r, g, b) = setSat cd_r cd_g cd_b (hslSat cs_r cs_g cs_b)
                                 setLum r g b (hslLum cd_r cd_g cd_b)
                             | ColorMode ->
                                 setLum cs_r cs_g cs_b (hslLum cd_r cd_g cd_b)
@@ -170,19 +178,24 @@ module Raster =
                                     | Overlay ->
                                         if dv < 0.5 then 2.0 * sv * dv
                                         else 1.0 - 2.0 * (1.0 - sv) * (1.0 - dv)
+                                    | HardLight ->
+                                        if sv <= 0.5 then 2.0 * sv * dv
+                                        else 1.0 - 2.0 * (1.0 - sv) * (1.0 - dv)
                                     | Darken -> min sv dv
                                     | Lighten -> max sv dv
                                     | ColorDodge ->
-                                        if sv >= 1.0 then 1.0
-                                        elif dv = 0.0 then 0.0
+                                        if dv <= 0.0 then 0.0
+                                        elif sv >= 1.0 then 1.0
                                         else min 1.0 (dv / (1.0 - sv))
                                     | ColorBurn ->
-                                        if sv = 0.0 then 0.0
-                                        elif dv >= 1.0 then 1.0
+                                        if dv >= 1.0 then 1.0
+                                        elif sv <= 0.0 then 0.0
                                         else 1.0 - min 1.0 ((1.0 - dv) / sv)
                                     | SoftLight ->
                                         if sv <= 0.5 then dv - (1.0 - 2.0 * sv) * dv * (1.0 - dv)
-                                        else dv + (2.0 * sv - 1.0) * (sqrt dv - dv)
+                                        else
+                                            let d = if dv <= 0.25 then ((16.0 * dv - 12.0) * dv + 4.0) * dv else sqrt dv
+                                            dv + (2.0 * sv - 1.0) * (d - dv)
                                     | Difference -> abs (sv - dv)
                                     | Exclusion -> sv + dv - 2.0 * sv * dv
                                     | _ -> sv
@@ -388,7 +401,7 @@ module Raster =
                     t' * s
             let su = applyTile tileX u src.W
             let sv = applyTile tileY v src.H
-            Pixel.toColor (sampleBilinear src su sv)
+            Pixel.toColor (sampleBilinear src su sv) |> Color.fromPremul
         | ImagePaint (src, xform) ->
             let inv = Matrix3x2.inverse xform
             let u = inv.M11 * float x + inv.M21 * float y + inv.DX
@@ -396,7 +409,7 @@ module Raster =
             if u < -0.5 || u > float src.W - 0.5 || v < -0.5 || v > float src.H - 0.5 then
                 { R = 0uy; G = 0uy; B = 0uy; A = 0uy }
             else
-                Pixel.toColor (sampleBilinear src u v)
+                Pixel.toColor (sampleBilinear src u v) |> Color.fromPremul
 
     let bresenham (fb: Framebuffer) (a: Vec2) (b: Vec2) (c: Color) (width: float<px>) =
         let x0 = int (float a.X) in let y0 = int (float a.Y)
@@ -785,6 +798,38 @@ module Raster =
                     cx <- startX; cy <- startY
         finishContour ()
         Seq.toList contours
+    /// Stroke contours retain whether they ended with Close. An open contour
+    /// returning to its start still has two endpoint caps, not a closing join.
+    let flattenStrokePath (segs: PathSeg list) =
+        let contours = ResizeArray<(float * float) list * bool>()
+        let current = ResizeArray<PathSeg>()
+        let mutable start = vec2 0.0 0.0
+        let finish closed =
+            for contour in flattenPath (List.ofSeq current) do
+                let points =
+                    contour
+                    |> List.fold (fun acc point ->
+                        match acc with
+                        | previous :: _ when previous = point -> acc
+                        | _ -> point :: acc) []
+                    |> List.rev
+                if points.Length > 1 then contours.Add(points, closed)
+            current.Clear()
+        for segment in segs do
+            match segment with
+            | MoveTo point ->
+                finish false
+                start <- point
+                current.Add segment
+            | Close ->
+                current.Add Close
+                finish true
+                // A later segment after Close begins at the closed start.
+                current.Add(MoveTo start)
+            | _ -> current.Add segment
+        finish false
+        List.ofSeq contours
+
 
     // ── Scanline fill (even-odd rule) ──
 
@@ -1489,14 +1534,46 @@ module Raster =
                                 consumed <- segLen
                                 if isOn then cur.Add(x1, y1)
                     if cur.Count > 1 then result.Add(Seq.toList cur)
-                    if result.Count = 0 then [pts]
+                    if result.Count = 0 then []
                     else Seq.toList result
+
+    /// Split a stroke into visible dashes and preserve a genuine closed seam.
+    let strokeDashes pts closed dashArray dashOffset =
+        let parts = dashPolyline pts dashArray dashOffset
+        if not closed || List.isEmpty parts then
+            parts |> List.map (fun part -> part, false)
+        else
+            let seam = List.head pts
+            let first = List.head parts
+            let last = List.last parts
+            if List.head first = seam && List.last last = seam then
+                if parts.Length = 1 then [first, true]
+                else
+                    let middle = parts |> List.skip 1 |> List.take (parts.Length - 2)
+                    let joined = last @ List.tail first
+                    (joined, false) :: (middle |> List.map (fun part -> part, false))
+            else parts |> List.map (fun part -> part, false)
+
 
     // ── Stroke expansion ──
 
-    let expandStroke (pts: (float * float) list) (style: StrokeStyle) : PathSeg list =
-        let arr = Array.ofList pts
+    let expandStroke (pts: (float * float) list) (closed: bool) (style: StrokeStyle) : PathSeg list =
+        let points = Array.ofList pts
+        let closed = closed && points.Length > 3
+        // Move the seam into the first edge so the original close point is
+        // handled by the same join logic as every other vertex. Closed paths
+        // have joins, not endpoint caps.
+        let arr =
+            if closed then
+                let x0, y0 = points.[0]
+                let x1, y1 = points.[1]
+                let midpoint = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+                Array.init (points.Length + 1) (fun i ->
+                    if i = 0 || i = points.Length then midpoint
+                    else points.[i])
+            else points
         let n = arr.Length
+        let cap = if closed then Butt else style.Cap
         if n < 2 then []
         else
             let hw = float style.Width / 2.0
@@ -1618,7 +1695,7 @@ module Raster =
             // End cap
             let (ex, ey) = arr.[n - 1]
             let (edx, edy) = dirs.[n - 2]
-            match style.Cap with
+            match cap with
             | Butt ->
                 result.Add(LineTo (toVec rightArr.[rightArr.Length - 1]))
             | Square ->
@@ -1643,7 +1720,7 @@ module Raster =
             // Start cap
             let (sx, sy) = arr.[0]
             let (sdx, sdy) = dirs.[0]
-            match style.Cap with
+            match cap with
             | Butt ->
                 result.Add(Close)
             | Square ->
@@ -1929,13 +2006,14 @@ module Raster =
                         let sc = filtered.[srcRow + x]
                         if Pixel.a sc > 0uy then
                             fpx.[dstRow + x] <- blendPx sc fpx.[dstRow + x]
+        | None, _
         | _, Some _ ->
             let filtered = applyFilters fb.W fb.H filters (tmp.Px.ToArray())
             for i = 0 to fb.Px.Length - 1 do
                 let sc = filtered.[i]
                 if Pixel.a sc > 0uy then
                     fpx.[i] <- blendPx sc fpx.[i]
-        | _, None -> ()
+        | Some _, None -> ()
 
     // ── Transform-aware dispatch ──
 
@@ -2271,6 +2349,146 @@ module Raster =
             else None
         | _ -> None
 
+    /// A unit-opacity transform or clip is a graphics-state wrapper, not an
+    /// object boundary. A non-unit-opacity Group is an indivisible object.
+    let rec transparencyObjects (cmd: Cmd) : Cmd list =
+        match cmd with
+        | Group (xform, opacity, children) when opacity >= 1.0 ->
+            children
+            |> List.collect (fun child ->
+                transparencyObjects child |> List.map (fun obj -> Group (xform, 1.0, [obj])))
+        | Clip (path, rule, children) ->
+            children
+            |> List.collect (fun child ->
+                transparencyObjects child |> List.map (fun obj -> Clip (path, rule, [obj])))
+        | _ -> [cmd]
+    /// A blend mode is applied against the group's backdrop, not while
+    /// rendering the object onto its initially transparent source surface.
+    let rec transparencyObjectBlend cmd =
+        match cmd with
+        | Blend (mode, children) -> SaveRestore children, mode
+        | Clip (path, rule, [child]) ->
+            let source, mode = transparencyObjectBlend child
+            Clip (path, rule, [source]), mode
+        | Group (matrix, opacity, [child]) ->
+            let source, mode = transparencyObjectBlend child
+            Group (matrix, opacity, [source]), mode
+        | Mask (mask, [child]) ->
+            let source, mode = transparencyObjectBlend child
+            Mask (mask, [source]), mode
+        | _ -> cmd, Normal
+
+
+    /// The knockout shape is geometric coverage, not the painted object's opacity.
+    /// Keep image alpha (it is part of an image's shape), but remove paint alpha and
+    /// wrapper opacity while retaining transforms, clipping and antialiasing.
+    let rec transparencyShapeCmd (cmd: Cmd) : Cmd =
+        let opaque (c: Color) = { c with A = 255uy }
+        let shapePaint = function
+            | NoPaint -> NoPaint
+            | ImagePaint _ as paint -> paint
+            | TilingPaint _ as paint -> paint
+            | _ -> Solid Color.white
+        let shapeStyle (style: StrokeStyle) = { style with Paint = shapePaint style.Paint }
+        let shapeChildren children = List.map transparencyShapeCmd children
+        match cmd with
+        | Clear _ -> Clear Color.white
+        | Line (a, b, _, w) -> Line (a, b, Color.white, w)
+        | FillRect (r, _) -> FillRect (r, Color.white)
+        | StrokeRect (r, _, w) -> StrokeRect (r, Color.white, w)
+        | FillCircle (center, radius, _) -> FillCircle (center, radius, Color.white)
+        | FillTri (a, b, c, _) -> FillTri (a, b, c, Color.white)
+        | FillPath (segs, paint, rule) -> FillPath (segs, shapePaint paint, rule)
+        | StrokePath (segs, style) -> StrokePath (segs, shapeStyle style)
+        | Group (xform, _, children) -> Group (xform, 1.0, shapeChildren children)
+        | TransparencyGroup (_, _, _, _, _, children) ->
+            Group (Matrix3x2.identity, 1.0, shapeChildren children)
+        | Clip (path, rule, children) -> Clip (path, rule, shapeChildren children)
+        | Filtered (filters, children) -> Filtered (filters, shapeChildren children)
+        | FillRoundedRect (r, radius, _) -> FillRoundedRect (r, radius, Color.white)
+        | StrokeRoundedRect (r, radius, style) -> StrokeRoundedRect (r, radius, shapeStyle style)
+        | FillRoundedRect4 (r, tl, tr, br, bl, _) -> FillRoundedRect4 (r, tl, tr, br, bl, Color.white)
+        | StrokeRoundedRect4 (r, tl, tr, br, bl, style) -> StrokeRoundedRect4 (r, tl, tr, br, bl, shapeStyle style)
+        | DrawImage _ -> cmd
+        | BoxShadow (r, dx, dy, blur, spread, color, inset, radius) ->
+            BoxShadow (r, dx, dy, blur, spread, opaque color, inset, radius)
+        | PathBool (op, a, b, paint, rule) -> PathBool (op, a, b, shapePaint paint, rule)
+        | Blit (src, pos, _) -> Blit (src, pos, 1.0)
+        | BlitExternalTexture (tex, pos, w, h, _) -> BlitExternalTexture (tex, pos, w, h, 1.0)
+        | BlitTexture (tex, pos, w, h, _) -> BlitTexture (tex, pos, w, h, 1.0)
+        | Mask (mask, children) -> Mask (mask, shapeChildren children)
+        | StrokeToFill (segs, style, paint, rule) ->
+            StrokeToFill (segs, shapeStyle style, shapePaint paint, rule)
+        | SaveRestore children -> SaveRestore (shapeChildren children)
+        | Blend (_, children) -> SaveRestore (shapeChildren children)
+        | AntiAlias (samples, children) -> AntiAlias (samples, shapeChildren children)
+        | DrawGlyphs (origin, runs, paint) -> DrawGlyphs (origin, runs, shapePaint paint)
+        | DrawBorder (r, top, right, bottom, left, tl, tr, br, bl) ->
+            let side s = { s with Color = opaque s.Color }
+            DrawBorder (r, side top, side right, side bottom, side left, tl, tr, br, bl)
+        | BackdropFilter (path, rule, filters, children) ->
+            BackdropFilter (path, rule, filters, shapeChildren children)
+        | Group3D (xform, _, children) -> Group3D (xform, 1.0, shapeChildren children)
+        | ShaderFill (r, _) -> FillRect (r, Color.white)
+        | RetainedGlesLayer _ -> cmd
+
+    /// Accumulate one already-rendered object. Alpha is tracked separately from
+    /// color because a nonisolated group contains backdrop color even where its
+    /// own contribution has zero alpha.
+    let accumulateTransparencyObject (group: Framebuffer) (alpha: Framebuffer)
+                                     (backdrop: Framebuffer) (source: Framebuffer)
+                                     (shape: Framebuffer option) (isolated: bool) (mode: BlendMode) =
+        let gp = group.Px.Span
+        let ap = alpha.Px.Span
+        let bp = backdrop.Px.Span
+        let sp = source.Px.Span
+        for i = 0 to group.Px.Length - 1 do
+            let src = sp.[i]
+            let sa = int (Pixel.a src)
+            match shape with
+            | None ->
+                gp.[i] <- blendWithMode mode src gp.[i]
+                let oldA = int (Pixel.a ap.[i])
+                let newA = sa + (oldA * (255 - sa) + 127) / 255
+                ap.[i] <- uint32 newA <<< 24
+            | Some shapeFb ->
+                let sh = max sa (int (Pixel.a shapeFb.Px.Span.[i]))
+                let inv = 255 - sh
+                let old = gp.[i]
+                let basePx = if isolated then 0u else bp.[i]
+                let blended = blendWithMode mode src basePx
+                let channel get =
+                    max 0 (min 255 (int (get blended) + ((int (get old) - int (get basePx)) * inv) / 255)) |> byte
+                gp.[i] <- Pixel.pack (channel Pixel.b) (channel Pixel.g) (channel Pixel.r) (channel Pixel.a)
+                let oldA = int (Pixel.a ap.[i])
+                ap.[i] <- uint32 (min 255 (sa + (oldA * inv + 127) / 255)) <<< 24
+
+    /// Extract the group's contribution from its original backdrop before
+    /// applying group-wide opacity, soft mask and blend mode exactly once.
+    let finishTransparencyGroup (destination: Framebuffer) (group: Framebuffer)
+                                (alpha: Framebuffer) (mask: Framebuffer option)
+                                (isolated: bool) (opacity: float) (mode: BlendMode) =
+        let dp = destination.Px.Span
+        let gp = group.Px.Span
+        let ap = alpha.Px.Span
+        for i = 0 to destination.Px.Length - 1 do
+            let a = int (Pixel.a ap.[i])
+            if a > 0 then
+                let current = gp.[i]
+                let backdrop = dp.[i]
+                let source =
+                    if isolated then current
+                    else
+                        let inv = 255 - a
+                        let channel get = byte (max 0 (min 255 (int (get current) - (int (get backdrop) * inv + 127) / 255)))
+                        Pixel.pack (channel Pixel.b) (channel Pixel.g) (channel Pixel.r) (byte a)
+                let maskAlpha =
+                    match mask with
+                    | Some maskFb -> float (Pixel.a maskFb.Px.Span.[i]) / 255.0
+                    | None -> 1.0
+                let sc = applyOpacity source (opacity * maskAlpha)
+                if Pixel.a sc > 0uy then dp.[i] <- blendWithMode mode sc backdrop
+
     let rec dispatchWithTransform (fb: Framebuffer) (m: Matrix3x2) (cmd: Cmd) =
         let isIdentity (m: Matrix3x2) =
             m.M11 = 1.0 && m.M12 = 0.0 && m.M21 = 0.0 && m.M22 = 1.0 && m.DX = 0.0 && m.DY = 0.0
@@ -2323,11 +2541,11 @@ module Raster =
                     DashArray = style.DashArray |> List.map (fun d -> d * sc)
                     DashOffset = style.DashOffset * sc }
             let segs' = segs |> List.map (transformPathSeg m)
-            let contours = flattenPath segs'
-            for contour in contours do
-                let dashed = dashPolyline contour (style'.DashArray |> List.map float) (float style'.DashOffset)
-                for sub in dashed do
-                    let outline = expandStroke sub style'
+            let contours = flattenStrokePath segs'
+            for contour, closed in contours do
+                let dashed = strokeDashes contour closed (style'.DashArray |> List.map float) (float style'.DashOffset)
+                for sub, subClosed in dashed do
+                    let outline = expandStroke sub subClosed style'
                     let outlineContours = flattenPath outline
                     scanlineFillPaint fb outlineContours style'.Paint EvenOdd
         | FillRoundedRect (r, cr, c) ->
@@ -2341,9 +2559,9 @@ module Raster =
         | StrokeRoundedRect (r, cr, style) ->
             let style' = { style with Paint = transformPaint m style.Paint }
             let path = roundedRectPath r cr |> List.map (transformPathSeg m)
-            let contours = flattenPath path
-            for contour in contours do
-                let outline = expandStroke contour style'
+            let contours = flattenStrokePath path
+            for contour, closed in contours do
+                let outline = expandStroke contour closed style'
                 let outlineContours = flattenPath outline
                 scanlineFillPaint fb outlineContours style'.Paint EvenOdd
         | FillRoundedRect4 (r, tl, tr, br, bl, c) ->
@@ -2357,85 +2575,43 @@ module Raster =
         | StrokeRoundedRect4 (r, tl, tr, br, bl, style) ->
             let style' = { style with Paint = transformPaint m style.Paint }
             let path = roundedRectPath4 r tl tr br bl |> List.map (transformPathSeg m)
-            let contours = flattenPath path
-            for contour in contours do
-                let outline = expandStroke contour style'
+            let contours = flattenStrokePath path
+            for contour, closed in contours do
+                let outline = expandStroke contour closed style'
                 let outlineContours = flattenPath outline
                 scanlineFillPaint fb outlineContours style'.Paint EvenOdd
         | DrawImage (src, srcRect, dstRect, smooth) ->
-            // Apply transform to destination rect (handles scroll, etc.)
-            let tdr =
-                if isIdentity m then dstRect
-                else
-                    let p = Matrix3x2.transformVec2 m dstRect.Pos
-                    let s = Matrix3x2.transformVec2 m { X = dstRect.Pos.X + dstRect.Size.X; Y = dstRect.Pos.Y + dstRect.Size.Y }
-                    rect (float p.X) (float p.Y) (float (s.X - p.X)) (float (s.Y - p.Y))
-            let dx0 = int (float tdr.Pos.X)
-            let dy0 = int (float tdr.Pos.Y)
-            let dx1 = int (float (tdr.Pos.X + tdr.Size.X))
-            let dy1 = int (float (tdr.Pos.Y + tdr.Size.Y))
-            let sx0 = float srcRect.Pos.X
-            let sy0 = float srcRect.Pos.Y
-            let sw = float srcRect.Size.X
-            let sh = float srcRect.Size.Y
-            let dw = float (dx1 - dx0)
-            let dh = float (dy1 - dy0)
-            if dw > 0.0 && dh > 0.0 && src.W > 0 && src.H > 0 then
-                let clipX0 = max 0 dx0
-                let clipY0 = max 0 dy0
-                let clipX1 = min fb.W dx1
-                let clipY1 = min fb.H dy1
-                let outW = clipX1 - clipX0
-                let outH = clipY1 - clipY0
-                if outW > 0 && outH > 0 then
-                    let srcPx = src.Px.Span
-                    let dstPx = fb.Px.Span
-                    let x0s = Array.zeroCreate<int> outW
-                    let x1s = Array.zeroCreate<int> outW
-                    let xfs = Array.zeroCreate<float> outW
-                    let invDw = sw / dw
-                    for x = 0 to outW - 1 do
-                        let px = clipX0 + x
-                        let u = sx0 + (float (px - dx0) + 0.5) * invDw
-                        if smooth then
-                            let x0 = int (floor u)
-                            x0s.[x] <- clampIndex (src.W - 1) x0
-                            x1s.[x] <- clampIndex (src.W - 1) (x0 + 1)
-                            xfs.[x] <- u - float x0
-                        else
-                            x0s.[x] <- clampIndex (src.W - 1) (int (round u))
-
-                    let invDh = sh / dh
-                    for py = clipY0 to clipY1 - 1 do
-                        let v = sy0 + (float (py - dy0) + 0.5) * invDh
-                        let y0, y1, fy =
-                            if smooth then
-                                let y0 = int (floor v)
-                                clampIndex (src.H - 1) y0, clampIndex (src.H - 1) (y0 + 1), v - float y0
-                            else
-                                let y = clampIndex (src.H - 1) (int (round v))
-                                y, y, 0.0
-                        let row0 = y0 * src.W
-                        let row1 = y1 * src.W
-                        let dstRow = py * fb.W + clipX0
-                        for x = 0 to outW - 1 do
-                            let c =
-                                if smooth then
-                                    bilinearPx
-                                        srcPx.[row0 + x0s.[x]]
-                                        srcPx.[row0 + x1s.[x]]
-                                        srcPx.[row1 + x0s.[x]]
-                                        srcPx.[row1 + x1s.[x]]
-                                        xfs.[x]
-                                        fy
+            let determinant = m.M11 * m.M22 - m.M12 * m.M21
+            let dx, dy = float dstRect.Pos.X, float dstRect.Pos.Y
+            let dw, dh = float dstRect.Size.X, float dstRect.Size.Y
+            if abs determinant > 1e-12 && dw > 0.0 && dh > 0.0 && src.W > 0 && src.H > 0 then
+                let p0 = Matrix3x2.transformVec2 m (vec2 dx dy)
+                let p1 = Matrix3x2.transformVec2 m (vec2 (dx + dw) dy)
+                let p2 = Matrix3x2.transformVec2 m (vec2 dx (dy + dh))
+                let p3 = Matrix3x2.transformVec2 m (vec2 (dx + dw) (dy + dh))
+                let x0 = max 0 (int (floor (float (min (min p0.X p1.X) (min p2.X p3.X)))))
+                let y0 = max 0 (int (floor (float (min (min p0.Y p1.Y) (min p2.Y p3.Y)))))
+                let x1 = min fb.W (int (ceil (float (max (max p0.X p1.X) (max p2.X p3.X)))))
+                let y1 = min fb.H (int (ceil (float (max (max p0.Y p1.Y) (max p2.Y p3.Y)))))
+                let inv = Matrix3x2.inverse m
+                let sx, sy = float srcRect.Pos.X, float srcRect.Pos.Y
+                let sw, sh = float srcRect.Size.X, float srcRect.Size.Y
+                let spx = src.Px.Span
+                let dpx = fb.Px.Span
+                for y = y0 to y1 - 1 do
+                    for x = x0 to x1 - 1 do
+                        let p = Matrix3x2.transformVec2 inv (vec2 (float x + 0.5) (float y + 0.5))
+                        let u, v = (float p.X - dx) / dw, (float p.Y - dy) / dh
+                        if u >= 0.0 && u < 1.0 && v >= 0.0 && v < 1.0 then
+                            let sampleX, sampleY = sx + u * sw, sy + v * sh
+                            let pixel =
+                                if smooth then sampleBilinear src (sampleX - 0.5) (sampleY - 0.5)
                                 else
-                                    srcPx.[row0 + x0s.[x]]
-                            let dstIndex = dstRow + x
-                            let alpha = c >>> 24
-                            if alpha = 255u then
-                                dstPx.[dstIndex] <- c
-                            elif alpha <> 0u then
-                                dstPx.[dstIndex] <- blendPx c dstPx.[dstIndex]
+                                    let ix = clampIndex (src.W - 1) (int (floor sampleX))
+                                    let iy = clampIndex (src.H - 1) (int (floor sampleY))
+                                    spx.[iy * src.W + ix]
+                            let index = y * fb.W + x
+                            dpx.[index] <- blendPx pixel dpx.[index]
         | BoxShadow (r, offsetX, offsetY, blurRadius, spread, color, inset, cornerRadius) ->
             let spreadF = float spread
             let shadowRect =
@@ -2697,6 +2873,8 @@ module Raster =
                     if Pixel.a sc > 0uy then
                         fpx.[i] <- blendPx sc fpx.[i]
                 releaseTempFb tmp
+        | TransparencyGroup (isolated, knockout, opacity, mode, mask, cmds) ->
+            dispatchTransparencyGroup fb m 0 isolated knockout opacity mode mask cmds
         | Clip (clipSegs, fillRule, cmds) ->
             let clipSegs' = clipSegs |> List.map (transformPathSeg m)
             match tryRectClip clipSegs' with
@@ -2704,10 +2882,12 @@ module Raster =
                 // Fast path: axis-aligned rect clip — no mask needed
                 let cx' = max 0 cx
                 let cy' = max 0 cy
-                let cw' = min cw (fb.W - cx') |> max 0
-                let ch' = min ch (fb.H - cy') |> max 0
+                let cw' = max 0 (min fb.W (cx + cw) - cx')
+                let ch' = max 0 (min fb.H (cy + ch) - cy')
                 if cw' > 0 && ch' > 0 then
                     let tmp = getTempFb cw' ch'
+                    for y = 0 to ch' - 1 do
+                        fb.Px.Span.Slice((cy' + y) * fb.W + cx', cw').CopyTo(tmp.Px.Span.Slice(y * cw', cw'))
                     let m' = { m with DX = m.DX - float cx'; DY = m.DY - float cy' }
                     cmds |> List.iter (dispatchWithTransform tmp m')
                     let tpx = tmp.Px.Span
@@ -2716,22 +2896,19 @@ module Raster =
                         let frow = (cy' + dy) * fb.W + cx'
                         let trow = dy * cw'
                         for dx = 0 to cw' - 1 do
-                            let sc = tpx.[trow + dx]
-                            if Pixel.a sc > 0uy then
-                                fpx.[frow + dx] <- blendPx sc fpx.[frow + dx]
+                            fpx.[frow + dx] <- tpx.[trow + dx]
                     releaseTempFb tmp
             | None ->
                 let contours = flattenPath clipSegs'
                 let mask = buildClipMask fb.W fb.H contours fillRule
                 let tmp = getTempFb fb.W fb.H
+                fb.Px.Span.CopyTo(tmp.Px.Span)
                 cmds |> List.iter (dispatchWithTransform tmp m)
                 let tpx = tmp.Px.Span
                 let fpx = fb.Px.Span
                 for i = 0 to fb.Px.Length - 1 do
                     if mask.[i] > 0uy then
-                        let sc = tpx.[i]
-                        if Pixel.a sc > 0uy then
-                            fpx.[i] <- blendPx sc fpx.[i]
+                        fpx.[i] <- tpx.[i]
                 releaseTempFb tmp
         | Filtered (filters, cmds) ->
             let tmp = getTempFb fb.W fb.H
@@ -2758,12 +2935,12 @@ module Raster =
             let style' = { style with Paint = transformPaint m style.Paint }
             let paint' = transformPaint m paint
             let segs' = segs |> List.map (transformPathSeg m)
-            let contours = flattenPath segs'
+            let contours = flattenStrokePath segs'
             let allOutline = ResizeArray<PathSeg>()
-            for contour in contours do
-                let dashed = dashPolyline contour (style'.DashArray |> List.map float) (float style'.DashOffset)
-                for sub in dashed do
-                    let outline = expandStroke sub style'
+            for contour, closed in contours do
+                let dashed = strokeDashes contour closed (style'.DashArray |> List.map float) (float style'.DashOffset)
+                for sub, subClosed in dashed do
+                    let outline = expandStroke sub subClosed style'
                     allOutline.AddRange(outline)
             let outlineContours = flattenPath (Seq.toList allOutline)
             scanlineFillPaint fb outlineContours paint' fillRule
@@ -2877,11 +3054,11 @@ module Raster =
                         DashArray = style.DashArray |> List.map (fun d -> d * sc)
                         DashOffset = style.DashOffset * sc }
                 let segs' = segs |> List.map (transformPathSeg m)
-                let contours = flattenPath segs'
-                for contour in contours do
-                    let dashed = dashPolyline contour (style'.DashArray |> List.map float) (float style'.DashOffset)
-                    for sub in dashed do
-                        let outline = expandStroke sub style'
+                let contours = flattenStrokePath segs'
+                for contour, closed in contours do
+                    let dashed = strokeDashes contour closed (style'.DashArray |> List.map float) (float style'.DashOffset)
+                    for sub, subClosed in dashed do
+                        let outline = expandStroke sub subClosed style'
                         let outlineContours = flattenPath outline
                         match style'.Paint with
                         | Solid c -> scanlineFillAA fb outlineContours c aaSamples EvenOdd
@@ -2897,9 +3074,9 @@ module Raster =
             | StrokeRoundedRect (r, cr, style) ->
                 let style' = { style with Paint = transformPaint m style.Paint }
                 let path = roundedRectPath r cr |> List.map (transformPathSeg m)
-                let contours = flattenPath path
-                for contour in contours do
-                    let outline = expandStroke contour style'
+                let contours = flattenStrokePath path
+                for contour, closed in contours do
+                    let outline = expandStroke contour closed style'
                     let outlineContours = flattenPath outline
                     match style'.Paint with
                     | Solid c -> scanlineFillAA fb outlineContours c aaSamples EvenOdd
@@ -2915,9 +3092,9 @@ module Raster =
             | StrokeRoundedRect4 (r, tl, tr, br, bl, style) ->
                 let style' = { style with Paint = transformPaint m style.Paint }
                 let path = roundedRectPath4 r tl tr br bl |> List.map (transformPathSeg m)
-                let contours = flattenPath path
-                for contour in contours do
-                    let outline = expandStroke contour style'
+                let contours = flattenStrokePath path
+                for contour, closed in contours do
+                    let outline = expandStroke contour closed style'
                     let outlineContours = flattenPath outline
                     match style'.Paint with
                     | Solid c -> scanlineFillAA fb outlineContours c aaSamples EvenOdd
@@ -2929,10 +3106,12 @@ module Raster =
                     // Fast path: axis-aligned rect clip — no mask needed
                     let cx' = max 0 cx
                     let cy' = max 0 cy
-                    let cw' = min cw (fb.W - cx') |> max 0
-                    let ch' = min ch (fb.H - cy') |> max 0
+                    let cw' = max 0 (min fb.W (cx + cw) - cx')
+                    let ch' = max 0 (min fb.H (cy + ch) - cy')
                     if cw' > 0 && ch' > 0 then
                         let tmp = getTempFb cw' ch'
+                        for y = 0 to ch' - 1 do
+                            fb.Px.Span.Slice((cy' + y) * fb.W + cx', cw').CopyTo(tmp.Px.Span.Slice(y * cw', cw'))
                         let m' = { m with DX = m.DX - float cx'; DY = m.DY - float cy' }
                         cmds |> List.iter (dispatchWithTransformAA tmp m' aaSamples)
                         let tpx = tmp.Px.Span
@@ -2941,24 +3120,23 @@ module Raster =
                             let frow = (cy' + dy) * fb.W + cx'
                             let trow = dy * cw'
                             for dx = 0 to cw' - 1 do
-                                let sc = tpx.[trow + dx]
-                                if Pixel.a sc > 0uy then
-                                    fpx.[frow + dx] <- blendPx sc fpx.[frow + dx]
+                                fpx.[frow + dx] <- tpx.[trow + dx]
                         releaseTempFb tmp
                 | None ->
                     let contours = flattenPath clipSegs'
                     let mask = buildClipMaskAA fb.W fb.H contours aaSamples fillRule
                     let tmp = getTempFb fb.W fb.H
+                    fb.Px.Span.CopyTo(tmp.Px.Span)
                     cmds |> List.iter (dispatchWithTransformAA tmp m aaSamples)
                     let tpx = tmp.Px.Span
                     let fpx = fb.Px.Span
                     for i = 0 to fb.Px.Length - 1 do
                         if mask.[i] > 0uy then
-                            let sc = tpx.[i]
-                            if Pixel.a sc > 0uy then
-                                let alphaScale = float mask.[i] / 255.0
-                                let sc' = applyOpacity sc alphaScale
-                                fpx.[i] <- blendPx sc' fpx.[i]
+                            let coverage = int mask.[i]
+                            let source = Pixel.toColor tpx.[i]
+                            let original = Pixel.toColor fpx.[i]
+                            let lerp (s: byte) (d: byte) = byte ((int s * coverage + int d * (255 - coverage) + 127) / 255)
+                            fpx.[i] <- Pixel.fromColor { R = lerp source.R original.R; G = lerp source.G original.G; B = lerp source.B original.B; A = lerp source.A original.A }
                     releaseTempFb tmp
             | Group (xform, opacity, cmds) ->
                 let combined = Matrix3x2.multiply xform m
@@ -2974,6 +3152,8 @@ module Raster =
                         if Pixel.a sc > 0uy then
                             fpx.[i] <- blendPx sc fpx.[i]
                     releaseTempFb tmp
+            | TransparencyGroup (isolated, knockout, opacity, mode, mask, cmds) ->
+                dispatchTransparencyGroup fb m aaSamples isolated knockout opacity mode mask cmds
             | PathBool (op, segsA, segsB, paint, fillRule) ->
                 let paint' = transformPaint m paint
                 let segsA' = segsA |> List.map (transformPathSeg m)
@@ -3001,12 +3181,12 @@ module Raster =
                 let style' = { style with Paint = transformPaint m style.Paint }
                 let paint' = transformPaint m paint
                 let segs' = segs |> List.map (transformPathSeg m)
-                let contours = flattenPath segs'
+                let contours = flattenStrokePath segs'
                 let allOutline = ResizeArray<PathSeg>()
-                for contour in contours do
-                    let dashed = dashPolyline contour (style'.DashArray |> List.map float) (float style'.DashOffset)
-                    for sub in dashed do
-                        let outline = expandStroke sub style'
+                for contour, closed in contours do
+                    let dashed = strokeDashes contour closed (style'.DashArray |> List.map float) (float style'.DashOffset)
+                    for sub, subClosed in dashed do
+                        let outline = expandStroke sub subClosed style'
                         allOutline.AddRange(outline)
                 let outlineContours = flattenPath (Seq.toList allOutline)
                 scanlineFillPaintAA fb outlineContours paint' aaSamples fillRule
@@ -3071,6 +3251,40 @@ module Raster =
                                     | Solid c -> scanlineFillAA fb contours c aaSamples NonZero
                                     | _ -> scanlineFillPaintAA fb contours paint' aaSamples NonZero
             | _ -> dispatchWithTransform fb m cmd
+    and dispatchTransparencyGroup (fb: Framebuffer) (m: Matrix3x2) (aaSamples: int)
+                                  (isolated: bool) (knockout: bool) (opacity: float)
+                                  (mode: BlendMode) (maskCmds: Cmd list option) (cmds: Cmd list) =
+        if opacity > 0.0 && not cmds.IsEmpty then
+            let group = getTempFb fb.W fb.H
+            if not isolated then fb.Px.Span.CopyTo(group.Px.Span)
+            let alpha = getTempFb fb.W fb.H
+            let source = getTempFb fb.W fb.H
+            let shape = if knockout then Some (getTempFb fb.W fb.H) else None
+            for cmd in cmds do
+                for obj in transparencyObjects cmd do
+                    let sourceCmd, objectMode = transparencyObjectBlend obj
+                    source.Px.Span.Clear()
+                    dispatchWithTransformAA source m aaSamples sourceCmd
+                    match shape with
+                    | Some shapeFb ->
+                        shapeFb.Px.Span.Clear()
+                        dispatchWithTransformAA shapeFb m aaSamples (transparencyShapeCmd obj)
+                    | None -> ()
+                    accumulateTransparencyObject group alpha fb source shape isolated objectMode
+            let mask =
+                match maskCmds with
+                | None -> None
+                | Some children ->
+                    let maskFb = getTempFb fb.W fb.H
+                    children |> List.iter (dispatchWithTransformAA maskFb m aaSamples)
+                    Some maskFb
+            finishTransparencyGroup fb group alpha mask isolated opacity mode
+            match mask with Some maskFb -> releaseTempFb maskFb | None -> ()
+            match shape with Some shapeFb -> releaseTempFb shapeFb | None -> ()
+            releaseTempFb source
+            releaseTempFb alpha
+            releaseTempFb group
+
 
     let dispatch (fb: Framebuffer) (cmd: Cmd) =
         dispatchWithTransform fb Matrix3x2.identity cmd
@@ -3110,6 +3324,7 @@ module Raster =
                 | FillPath(_, paint, _) -> "FillPath:" + paintKind paint
                 | StrokePath(_, style) -> "StrokePath:" + paintKind style.Paint
                 | Group _ -> "Group"
+                | TransparencyGroup _ -> "TransparencyGroup"
                 | Clip _ -> "Clip"
                 | Filtered _ -> "Filtered"
                 | FillRoundedRect _ -> "FillRoundedRect"

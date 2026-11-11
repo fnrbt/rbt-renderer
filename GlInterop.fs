@@ -161,6 +161,7 @@ module Gl =
     [<DllImport(LibGLES)>] extern void glViewport(int x, int y, int w, int h)
     [<DllImport(LibGLES)>] extern void glEnable(int cap)
     [<DllImport(LibGLES)>] extern void glDisable(int cap)
+    [<DllImport(LibGLES)>] extern byte glIsEnabled(int cap)
     [<DllImport(LibGLES)>] extern void glBlendFunc(int sfactor, int dfactor)
     [<DllImport(LibGLES)>] extern void glStencilFunc(int func, int ref', int mask)
     [<DllImport(LibGLES)>] extern void glStencilOp(int sfail, int dpfail, int dppass)

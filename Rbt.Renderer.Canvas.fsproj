@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <FSharpCoreImplicitPackageVersion>10.1.402</FSharpCoreImplicitPackageVersion>
+    <RbtRendererCorePackageVersion Condition="'$(RbtRendererCorePackageVersion)' == ''">0.1.5</RbtRendererCorePackageVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Rbt.Renderer.Core" Version="$(RbtRendererCorePackageVersion)" />
+    <PackageReference Include="Fable.Core" Version="4.3.0" />
+    <PackageReference Include="Fable.Browser.Dom" Version="2.17.0" />
+    <PackageReference Include="Fable.Browser.Blob" Version="1.4.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="CanvasApi.fs" />
+    <Compile Include="CanvasGlyphCache.fs" />
+    <Compile Include="CanvasImage.fs" />
+    <Compile Include="CanvasBackend.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="$(MSBuildProjectFullPath)" PackagePath="fable/" Pack="true" Visible="false" />
+    <Content Include="@(Compile)" PackagePath="fable/%(RelativeDir)" Pack="true" Visible="false" />
+  </ItemGroup>
+</Project>
