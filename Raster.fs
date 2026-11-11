@@ -2388,6 +2388,9 @@ module Raster =
     /// rendering the object onto its initially transparent source surface.
     let rec transparencyObjectBlend cmd =
         match cmd with
+        | WithShape (shape, [child]) ->
+            let source, mode = transparencyObjectBlend child
+            WithShape (shape, [source]), mode
         | Blend (mode, children) -> SaveRestore children, mode
         | Clip (path, rule, [child]) ->
             let source, mode = transparencyObjectBlend child
@@ -2408,6 +2411,8 @@ module Raster =
     let rec transparencyNeedsBackdrop = function
         | TransparencyGroup (isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
         | ColorManagedGroup (_, isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
+        | WithShape (_, [child]) -> transparencyNeedsBackdrop child
+        | WithShape (_, children) -> not children.IsEmpty
         | Group (_, opacity, [child]) when opacity >= 1.0 -> transparencyNeedsBackdrop child
         | Clip (_, _, [child])
         | SaveRestore [child]
@@ -2444,7 +2449,7 @@ module Raster =
                 gp.[i] <- cp.[i]
                 ap.[i] <- uint32 (sa + (oldA * (255 - sa) + 127) / 255) <<< 24
             | Some shapeFb ->
-                let inv = 255 - max sa (int (Pixel.a shapeFb.Px.Span.[i]))
+                let inv = 255 - int (Pixel.a shapeFb.Px.Span.[i])
                 let old = gp.[i]
                 let basePx = if isolated then 0u else bp.[i]
                 let result = cp.[i]
@@ -2454,60 +2459,6 @@ module Raster =
                 ap.[i] <- uint32 (min 255 (sa + (oldA * inv + 127) / 255)) <<< 24
 
 
-    /// The knockout shape is geometric coverage, not the painted object's opacity.
-    /// Keep image alpha (it is part of an image's shape), but remove paint alpha and
-    /// wrapper opacity while retaining transforms, clipping and antialiasing.
-    let rec transparencyShapeCmd (cmd: Cmd) : Cmd =
-        let opaque (c: Color) = { c with A = 255uy }
-        let shapePaint = function
-            | NoPaint -> NoPaint
-            | ImagePaint _ as paint -> paint
-            | TilingPaint _ as paint -> paint
-            | _ -> Solid Color.white
-        let shapeStyle (style: StrokeStyle) = { style with Paint = shapePaint style.Paint }
-        let shapeChildren children = List.map transparencyShapeCmd children
-        match cmd with
-        | Clear _ -> Clear Color.white
-        | Line (a, b, _, w) -> Line (a, b, Color.white, w)
-        | FillRect (r, _) -> FillRect (r, Color.white)
-        | StrokeRect (r, _, w) -> StrokeRect (r, Color.white, w)
-        | FillCircle (center, radius, _) -> FillCircle (center, radius, Color.white)
-        | FillTri (a, b, c, _) -> FillTri (a, b, c, Color.white)
-        | FillPath (segs, paint, rule) -> FillPath (segs, shapePaint paint, rule)
-        | StrokePath (segs, style) -> StrokePath (segs, shapeStyle style)
-        | Group (xform, _, children) -> Group (xform, 1.0, shapeChildren children)
-        | TransparencyGroup (_, _, _, _, _, children) ->
-            Group (Matrix3x2.identity, 1.0, shapeChildren children)
-        | ColorManagedGroup (_, _, _, _, _, _, children) ->
-            Group (Matrix3x2.identity, 1.0, shapeChildren children)
-        | Clip (path, rule, children) -> Clip (path, rule, shapeChildren children)
-        | Filtered (filters, children) -> Filtered (filters, shapeChildren children)
-        | FillRoundedRect (r, radius, _) -> FillRoundedRect (r, radius, Color.white)
-        | StrokeRoundedRect (r, radius, style) -> StrokeRoundedRect (r, radius, shapeStyle style)
-        | FillRoundedRect4 (r, tl, tr, br, bl, _) -> FillRoundedRect4 (r, tl, tr, br, bl, Color.white)
-        | StrokeRoundedRect4 (r, tl, tr, br, bl, style) -> StrokeRoundedRect4 (r, tl, tr, br, bl, shapeStyle style)
-        | DrawImage _ -> cmd
-        | BoxShadow (r, dx, dy, blur, spread, color, inset, radius) ->
-            BoxShadow (r, dx, dy, blur, spread, opaque color, inset, radius)
-        | PathBool (op, a, b, paint, rule) -> PathBool (op, a, b, shapePaint paint, rule)
-        | Blit (src, pos, _) -> Blit (src, pos, 1.0)
-        | BlitExternalTexture (tex, pos, w, h, _) -> BlitExternalTexture (tex, pos, w, h, 1.0)
-        | BlitTexture (tex, pos, w, h, _) -> BlitTexture (tex, pos, w, h, 1.0)
-        | Mask (mask, children) -> Mask (mask, shapeChildren children)
-        | StrokeToFill (segs, style, paint, rule) ->
-            StrokeToFill (segs, shapeStyle style, shapePaint paint, rule)
-        | SaveRestore children -> SaveRestore (shapeChildren children)
-        | Blend (_, children) -> SaveRestore (shapeChildren children)
-        | AntiAlias (samples, children) -> AntiAlias (samples, shapeChildren children)
-        | DrawGlyphs (origin, runs, paint) -> DrawGlyphs (origin, runs, shapePaint paint)
-        | DrawBorder (r, top, right, bottom, left, tl, tr, br, bl) ->
-            let side s = { s with Color = opaque s.Color }
-            DrawBorder (r, side top, side right, side bottom, side left, tl, tr, br, bl)
-        | BackdropFilter (path, rule, filters, children) ->
-            BackdropFilter (path, rule, filters, shapeChildren children)
-        | Group3D (xform, _, children) -> Group3D (xform, 1.0, shapeChildren children)
-        | ShaderFill (r, _) -> FillRect (r, Color.white)
-        | RetainedGlesLayer _ -> cmd
 
     /// Accumulate one already-rendered object. Alpha is tracked separately from
     /// color because a nonisolated group contains backdrop color even where its
@@ -2529,7 +2480,7 @@ module Raster =
                 let newA = sa + (oldA * (255 - sa) + 127) / 255
                 ap.[i] <- uint32 newA <<< 24
             | Some shapeFb ->
-                let sh = max sa (int (Pixel.a shapeFb.Px.Span.[i]))
+                let sh = int (Pixel.a shapeFb.Px.Span.[i])
                 let inv = 255 - sh
                 let old = gp.[i]
                 let basePx = if isolated then 0u else bp.[i]
@@ -2602,6 +2553,7 @@ module Raster =
         let isIdentity (m: Matrix3x2) =
             m.M11 = 1.0 && m.M12 = 0.0 && m.M21 = 0.0 && m.M22 = 1.0 && m.DX = 0.0 && m.DY = 0.0
         match cmd with
+        | WithShape (_, cmds) -> cmds |> List.iter (dispatchWithTransform fb m)
         | Clear c -> clearFb fb c
         | Line (a, b, c, w) ->
             let a' = Matrix3x2.transformVec2 m a
@@ -3119,6 +3071,7 @@ module Raster =
             let isIdentity (m: Matrix3x2) =
                 m.M11 = 1.0 && m.M12 = 0.0 && m.M21 = 0.0 && m.M22 = 1.0 && m.DX = 0.0 && m.DY = 0.0
             match cmd with
+            | WithShape (_, cmds) -> cmds |> List.iter (dispatchWithTransformAA fb m aaSamples)
             | FillRect (r, c) ->
                 // Axis-aligned rects don't need AA — use fast path directly
                 if isIdentity m then fillRect fb r c
@@ -3378,7 +3331,7 @@ module Raster =
                         match shape with
                         | Some shapeFb ->
                             shapeFb.Px.Span.Clear()
-                            dispatchWithTransformAA shapeFb m samples (transparencyShapeCmd obj)
+                            dispatchWithTransformAA shapeFb m samples (Cmd.shapeOf obj)
                         | None -> ()
                         if transparencyNeedsBackdrop obj then
                             let candidateFb =
@@ -3442,6 +3395,7 @@ module Raster =
                 | TilingPaint _ -> "TilingPaint"
                 | ImagePaint _ -> "ImagePaint"
             let kindOf = function
+                | WithShape _ -> "WithShape"
                 | Clear _ -> "Clear"
                 | Line _ -> "Line"
                 | FillRect _ -> "FillRect"

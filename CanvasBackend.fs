@@ -62,86 +62,6 @@ let private drawLayer (ctx: CanvasRenderingContext2D) canvas operation opacity =
     emitJsExpr (ctx, operation, canvas) "($0.globalCompositeOperation = $1, $0.drawImage($2, 0, 0))"
     ctx.restore()
 
-// A PDF object's shape is its geometric coverage, not its painted alpha.
-// In particular a transparent solid fill still knocks out the earlier objects.
-let rec private drawShape (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
-    match cmd with
-    | Group (m, _, children) ->
-        ctx.save()
-        ctx.transform(m.M11, m.M12, m.M21, m.M22, m.DX, m.DY)
-        for child in children do drawShape ctx child
-        ctx.restore()
-    | Clip (segs, rule, children) ->
-        ctx.save()
-        ctxClipPath ctx (toPath2D segs) (fillRuleStr rule)
-        for child in children do drawShape ctx child
-        ctx.restore()
-    | TransparencyGroup (_, _, _, _, _, children)
-    | ColorManagedGroup (_, _, _, _, _, _, children)
-    | Blend (_, children)
-    | SaveRestore children
-    | Filtered (_, children) ->
-        for child in children do drawShape ctx child
-    | Mask (_, children) ->
-        for child in children do drawShape ctx child
-    | FillPath (segs, paint, rule) ->
-        match paint with
-        | NoPaint -> ()
-        | ImagePaint (image, placement) ->
-            ctx.save()
-            ctxClipPath ctx (toPath2D segs) (fillRuleStr rule)
-            ctx.transform(placement.M11, placement.M12, placement.M21, placement.M22, placement.DX, placement.DY)
-            emitJsExpr (ctx, CanvasImage.canvasFor image) "$0.drawImage($1, -0.5, -0.5)"
-            ctx.restore()
-        | _ ->
-            ctx.fillStyle <- !^"white"
-            ctxFillPath ctx (toPath2D segs) (fillRuleStr rule)
-    | StrokePath (segs, style) ->
-        match style.Paint with
-        | NoPaint -> ()
-        | _ ->
-            applyStroke ctx style
-            ctx.strokeStyle <- !^"white"
-            ctxStrokePath ctx (toPath2D segs)
-    | DrawGlyphs (origin, runs, paint) ->
-        match paint with
-        | NoPaint -> ()
-        | _ ->
-            ctx.fillStyle <- !^"white"
-            for run in runs do
-                let upm = Text.unitsPerEm run.Font
-                if upm > 0.0 then
-                    let s = run.FontSize / upm
-                    for g in run.Glyphs do
-                        match CanvasGlyphCache.get run.Font g.GlyphId with
-                        | Some path ->
-                            ctx.save()
-                            ctx.translate(float origin.X + g.X, float origin.Y + g.Y)
-                            ctx.scale(s, s)
-                            ctxFillPath ctx path "nonzero"
-                            ctx.restore()
-                        | None -> ()
-    | DrawImage (image, src, dst, smooth) ->
-        ctx.save()
-        ctx.imageSmoothingEnabled <- smooth
-        ctxDrawImage9 ctx (CanvasImage.canvasFor image)
-            (float src.Pos.X) (float src.Pos.Y) (float src.Size.X) (float src.Size.Y)
-            (float dst.Pos.X) (float dst.Pos.Y) (float dst.Size.X) (float dst.Size.Y)
-        ctx.restore()
-    | FillRect (rect, _) ->
-        ctx.fillStyle <- !^"white"
-        ctx.fillRect(float rect.Pos.X, float rect.Pos.Y, float rect.Size.X, float rect.Size.Y)
-    | Line (p0, p1, _, width) ->
-        ctx.strokeStyle <- !^"white"
-        ctx.lineWidth <- float width
-        ctx.beginPath()
-        ctx.moveTo(float p0.X, float p0.Y)
-        ctx.lineTo(float p1.X, float p1.Y)
-        ctx.stroke()
-    | Clear _ ->
-        ctx.fillStyle <- !^"white"
-        emitJsExpr ctx "$0.fillRect(0, 0, $0.canvas.width, $0.canvas.height)"
-    | _ -> ()
 
 // Clip and transform wrappers can contain many PDF paint objects. Their
 // children retain their own knockout and blend boundaries.
@@ -165,6 +85,9 @@ let rec private groupObjects = function
 // the object actually meets the group's working backdrop.
 let rec private groupObject = function
     | Blend (mode, children) -> SaveRestore children, mode
+    | WithShape (shape, [child]) ->
+        let source, mode = groupObject child
+        WithShape (shape, [source]), mode
     | Clip (path, rule, [child]) ->
         let source, mode = groupObject child
         Clip (path, rule, [source]), mode
@@ -179,6 +102,8 @@ let rec private groupObject = function
 let rec private groupNeedsBackdrop = function
     | TransparencyGroup (isolated, _, _, mode, _, _)
     | ColorManagedGroup (_, isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
+    | WithShape (_, [child]) -> groupNeedsBackdrop child
+    | WithShape (_, children) -> not children.IsEmpty
     | Group (_, opacity, [child]) when opacity >= 1.0 -> groupNeedsBackdrop child
     | Clip (_, _, [child])
     | SaveRestore [child]
@@ -263,6 +188,7 @@ let private convertCanvas (ctx: CanvasRenderingContext2D) width height convert =
 
 let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
     match cmd with
+    | WithShape (_, commands) -> for c in commands do execute ctx c
     | Group (m, opacity, cmds) ->
         if opacity >= 1.0 then
             ctx.save()
@@ -378,8 +304,11 @@ let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
         | _ -> ()
 
     | StrokePath (segs, st) ->
-        applyStroke ctx st
-        ctxStrokePath ctx (toPath2D segs)
+        match st.Paint with
+        | NoPaint -> ()
+        | _ ->
+            applyStroke ctx st
+            ctxStrokePath ctx (toPath2D segs)
 
     | DrawGlyphs (origin, runs, paint) ->
         match paint with
@@ -467,7 +396,7 @@ and private executeTransparencyGroup (ctx: CanvasRenderingContext2D) conversion 
                         | Some value -> value
                         | None -> layerFor ctx width height
                     let _, shapeContext = layerFor ctx width height
-                    drawShape shapeContext child
+                    execute shapeContext (Cmd.shapeOf child)
                     let _, candidateContext = layerFor ctx width height
                     drawLayer candidateContext baseLayer "source-over" 1.0
                     if needsBackdrop then execute candidateContext child

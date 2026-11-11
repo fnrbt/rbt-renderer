@@ -782,6 +782,7 @@ void main() {
     and dispatch (st: GlState) (orthoBase: float32[]) (m: Matrix3x2) (softFb: Framebuffer) (cmd: Cmd) =
         let mvp = transformToMat4 m orthoBase
         match cmd with
+        | WithShape (_, cmds) -> cmds |> List.iter (dispatch st orthoBase m softFb)
         | RetainedGlesLayer (bounds, layer) ->
             let frame =
                 { Bounds = bounds
@@ -1016,7 +1017,7 @@ void main() {
                             let sourceCmd, objectMode = Raster.transparencyObjectBlend obj
                             renderObject [sourceCmd] source
                             match shape with
-                            | Some shapeFb -> renderObject [Raster.transparencyShapeCmd obj] shapeFb
+                            | Some shapeFb -> renderObject [Cmd.shapeOf obj] shapeFb
                             | None -> ()
                             if Raster.transparencyNeedsBackdrop obj then
                                 let candidateFb =

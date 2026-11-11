@@ -79,6 +79,15 @@ before boundary blend mode, opacity and mask. Untouched parent pixels do not
 make a color-space round trip. Ordinary `TransparencyGroup` inherits its
 parent's working space.
 
+`WithShape (shape, commands)` marks one indivisible object while executing its
+color commands directly in the current context. Its lazy shape program is
+evaluated only when a containing knockout group needs coverage; its alpha is
+coverage independently of the color alpha. `Cmd.shapeOf` derives a coverage
+program from ordinary commands, retaining transforms, clips and intrinsic
+image alpha, and uses an explicit `WithShape` program without changing its alpha.
+Group coverage is the union of child coverage rather than the group's final
+opacity. Masks in a supplied shape program modulate that coverage.
+
 Packed source-over uses exact rounded division by 255 in both channel pairs;
 the former division-by-256 approximation could reduce opaque alpha to 254.
 Premultiplication also rounds each channel by 255 instead of truncating it.
