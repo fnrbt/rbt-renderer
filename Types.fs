@@ -38,8 +38,9 @@ module Types =
             if c.A = 255uy then c
             elif c.A = 0uy then { R = 0uy; G = 0uy; B = 0uy; A = 0uy }
             else
-                let a = float c.A / 255.0
-                { R = byte (float c.R * a); G = byte (float c.G * a); B = byte (float c.B * a); A = c.A }
+                let alpha = int c.A
+                let inline channel (value: byte) = byte ((int value * alpha + 127) / 255)
+                { R = channel c.R; G = channel c.G; B = channel c.B; A = c.A }
         let fromPremul (c: Color) =
             if c.A = 255uy then c
             elif c.A = 0uy then { R = 0uy; G = 0uy; B = 0uy; A = 0uy }

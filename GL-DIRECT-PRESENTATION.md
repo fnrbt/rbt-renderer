@@ -81,6 +81,10 @@ parent's working space.
 
 Packed source-over uses exact rounded division by 255 in both channel pairs;
 the former division-by-256 approximation could reduce opaque alpha to 254.
+Premultiplication also rounds each channel by 255 instead of truncating it.
+Painting a color over the same opaque color therefore preserves every component
+at every source alpha; truncation previously shifted encoded ICC components
+before the group's display conversion.
 
 Transparency groups on GL use CPU readback/compositing and upload, including
 `ColorManagedGroup`; they are not a zero-readback direct-presentation path.
