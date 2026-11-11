@@ -2110,6 +2110,22 @@ module Raster =
         | ImagePaint (src, xform) ->
             ImagePaint (src, Matrix3x2.multiply xform m)
 
+    /// Outline expansion after path coordinates have been transformed into device space.
+    let strokeStyleInDeviceSpace (m: Matrix3x2) (style: StrokeStyle) =
+        let scale = sqrt (abs (m.M11 * m.M22 - m.M12 * m.M21))
+        { style with
+            Paint = transformPaint m style.Paint
+            Width = if style.Width = 0.0<px> then 1.0<px> else style.Width * scale
+            DashArray = style.DashArray |> List.map (fun d -> d * scale)
+            DashOffset = style.DashOffset * scale }
+
+    /// Outline expansion before the GL transform: compensate only exact hairlines.
+    let hairlineStyleInUserSpace (m: Matrix3x2) (style: StrokeStyle) =
+        if style.Width <> 0.0<px> then style
+        else
+            let scale = sqrt (abs (m.M11 * m.M22 - m.M12 * m.M21))
+            { style with Width = if scale > 0.0 then 1.0<px> / scale else 1.0<px> }
+
     let roundedRectPath (r: Rect) (cr: float<px>) : PathSeg list =
         let pi = System.Math.PI
         let halfW = float r.Size.X / 2.0
@@ -2361,6 +2377,12 @@ module Raster =
             children
             |> List.collect (fun child ->
                 transparencyObjects child |> List.map (fun obj -> Clip (path, rule, [obj])))
+        | SaveRestore children ->
+            children |> List.collect (fun child ->
+                transparencyObjects child |> List.map (fun obj -> Group (Matrix3x2.identity, 1.0, [obj])))
+        | AntiAlias (samples, children) ->
+            children |> List.collect (fun child ->
+                transparencyObjects child |> List.map (fun obj -> AntiAlias (samples, [obj])))
         | _ -> [cmd]
     /// A blend mode is applied against the group's backdrop, not while
     /// rendering the object onto its initially transparent source surface.
@@ -2373,10 +2395,62 @@ module Raster =
         | Group (matrix, opacity, [child]) ->
             let source, mode = transparencyObjectBlend child
             Group (matrix, opacity, [source]), mode
+        | AntiAlias (samples, [child]) ->
+            let source, mode = transparencyObjectBlend child
+            AntiAlias (samples, [source]), mode
         | Mask (mask, [child]) ->
             let source, mode = transparencyObjectBlend child
             Mask (mask, [source]), mode
         | _ -> cmd, Normal
+
+    /// Both nonisolated interiors and a non-Normal group boundary need the
+    /// object's actual backdrop, through graphics-state-only wrappers.
+    let rec transparencyNeedsBackdrop = function
+        | TransparencyGroup (isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
+        | Group (_, opacity, [child]) when opacity >= 1.0 -> transparencyNeedsBackdrop child
+        | Clip (_, _, [child])
+        | SaveRestore [child]
+        | AntiAlias (_, [child]) -> transparencyNeedsBackdrop child
+        | _ -> false
+
+    // Apply AA at the object dispatch rather than rendering its wrapper to an
+    // empty temporary surface, so a nested group retains its backdrop.
+    let rec transparencyObjectSampling samples = function
+        | AntiAlias (innerSamples, [child]) -> transparencyObjectSampling innerSamples child
+        | Group (matrix, opacity, [child]) when opacity >= 1.0 ->
+            let innerSamples, inner = transparencyObjectSampling samples child
+            innerSamples, Group (matrix, opacity, [inner])
+        | Clip (path, rule, [child]) ->
+            let innerSamples, inner = transparencyObjectSampling samples child
+            innerSamples, Clip (path, rule, [inner])
+        | child -> samples, child
+
+    /// The candidate is the object already rendered against its proper base.
+    let accumulateTransparencyCandidate (group: Framebuffer) (alpha: Framebuffer)
+                                        (backdrop: Framebuffer) (candidate: Framebuffer)
+                                        (source: Framebuffer) (shape: Framebuffer option)
+                                        (isolated: bool) =
+        let gp = group.Px.Span
+        let ap = alpha.Px.Span
+        let bp = backdrop.Px.Span
+        let cp = candidate.Px.Span
+        let sp = source.Px.Span
+        for i = 0 to group.Px.Length - 1 do
+            let sa = int (Pixel.a sp.[i])
+            let oldA = int (Pixel.a ap.[i])
+            match shape with
+            | None ->
+                gp.[i] <- cp.[i]
+                ap.[i] <- uint32 (sa + (oldA * (255 - sa) + 127) / 255) <<< 24
+            | Some shapeFb ->
+                let inv = 255 - max sa (int (Pixel.a shapeFb.Px.Span.[i]))
+                let old = gp.[i]
+                let basePx = if isolated then 0u else bp.[i]
+                let result = cp.[i]
+                let channel get =
+                    byte (max 0 (min 255 (int (get result) + (int (get old) - int (get basePx)) * inv / 255)))
+                gp.[i] <- Pixel.pack (channel Pixel.b) (channel Pixel.g) (channel Pixel.r) (channel Pixel.a)
+                ap.[i] <- uint32 (min 255 (sa + (oldA * inv + 127) / 255)) <<< 24
 
 
     /// The knockout shape is geometric coverage, not the painted object's opacity.
@@ -2529,17 +2603,7 @@ module Raster =
                 let contours = flattenPath segs'
                 scanlineFillPaint fb contours paint' fillRule
         | StrokePath (segs, style) ->
-            // Stroke width and dashes are specified in user space, so a scaling
-            // transform on the CTM (e.g. an SVG viewBox shrinking a 3277-unit
-            // artwork into a 64px icon) must scale them too. Without this the
-            // stroke keeps its unscaled device-pixel width and swamps the shape.
-            let sc = sqrt (abs (m.M11 * m.M22 - m.M12 * m.M21))
-            let style' =
-                { style with
-                    Paint = transformPaint m style.Paint
-                    Width = style.Width * sc
-                    DashArray = style.DashArray |> List.map (fun d -> d * sc)
-                    DashOffset = style.DashOffset * sc }
+            let style' = strokeStyleInDeviceSpace m style
             let segs' = segs |> List.map (transformPathSeg m)
             let contours = flattenStrokePath segs'
             for contour, closed in contours do
@@ -2557,7 +2621,7 @@ module Raster =
                 let contours = flattenPath path
                 scanlineFill fb contours c EvenOdd
         | StrokeRoundedRect (r, cr, style) ->
-            let style' = { style with Paint = transformPaint m style.Paint }
+            let style' = strokeStyleInDeviceSpace m style
             let path = roundedRectPath r cr |> List.map (transformPathSeg m)
             let contours = flattenStrokePath path
             for contour, closed in contours do
@@ -2573,7 +2637,7 @@ module Raster =
                 let contours = flattenPath path
                 scanlineFill fb contours c EvenOdd
         | StrokeRoundedRect4 (r, tl, tr, br, bl, style) ->
-            let style' = { style with Paint = transformPaint m style.Paint }
+            let style' = strokeStyleInDeviceSpace m style
             let path = roundedRectPath4 r tl tr br bl |> List.map (transformPathSeg m)
             let contours = flattenStrokePath path
             for contour, closed in contours do
@@ -2932,7 +2996,7 @@ module Raster =
             releaseTempFb tmp
             releaseTempFb maskFb
         | StrokeToFill (segs, style, paint, fillRule) ->
-            let style' = { style with Paint = transformPaint m style.Paint }
+            let style' = strokeStyleInDeviceSpace m style
             let paint' = transformPaint m paint
             let segs' = segs |> List.map (transformPathSeg m)
             let contours = flattenStrokePath segs'
@@ -3043,16 +3107,7 @@ module Raster =
                 let contours = flattenPath path
                 scanlineFillAA fb contours c aaSamples EvenOdd
             | StrokePath (segs, style) ->
-                // Stroke width/dashes are in user space; scale them by the CTM's
-                // scale factor (sqrt|det|) so a scaling transform (e.g. an SVG
-                // viewBox) doesn't leave the stroke at its unscaled device width.
-                let sc = sqrt (abs (m.M11 * m.M22 - m.M12 * m.M21))
-                let style' =
-                    { style with
-                        Paint = transformPaint m style.Paint
-                        Width = style.Width * sc
-                        DashArray = style.DashArray |> List.map (fun d -> d * sc)
-                        DashOffset = style.DashOffset * sc }
+                let style' = strokeStyleInDeviceSpace m style
                 let segs' = segs |> List.map (transformPathSeg m)
                 let contours = flattenStrokePath segs'
                 for contour, closed in contours do
@@ -3072,7 +3127,7 @@ module Raster =
                     let contours = flattenPath path
                     scanlineFillAA fb contours c aaSamples EvenOdd
             | StrokeRoundedRect (r, cr, style) ->
-                let style' = { style with Paint = transformPaint m style.Paint }
+                let style' = strokeStyleInDeviceSpace m style
                 let path = roundedRectPath r cr |> List.map (transformPathSeg m)
                 let contours = flattenStrokePath path
                 for contour, closed in contours do
@@ -3090,7 +3145,7 @@ module Raster =
                     let contours = flattenPath path
                     scanlineFillAA fb contours c aaSamples EvenOdd
             | StrokeRoundedRect4 (r, tl, tr, br, bl, style) ->
-                let style' = { style with Paint = transformPaint m style.Paint }
+                let style' = strokeStyleInDeviceSpace m style
                 let path = roundedRectPath4 r tl tr br bl |> List.map (transformPathSeg m)
                 let contours = flattenStrokePath path
                 for contour, closed in contours do
@@ -3178,7 +3233,7 @@ module Raster =
                 releaseTempFb tmp
                 releaseTempFb maskFb
             | StrokeToFill (segs, style, paint, fillRule) ->
-                let style' = { style with Paint = transformPaint m style.Paint }
+                let style' = strokeStyleInDeviceSpace m style
                 let paint' = transformPaint m paint
                 let segs' = segs |> List.map (transformPathSeg m)
                 let contours = flattenStrokePath segs'
@@ -3257,20 +3312,46 @@ module Raster =
         if opacity > 0.0 && not cmds.IsEmpty then
             let group = getTempFb fb.W fb.H
             if not isolated then fb.Px.Span.CopyTo(group.Px.Span)
-            let alpha = getTempFb fb.W fb.H
-            let source = getTempFb fb.W fb.H
-            let shape = if knockout then Some (getTempFb fb.W fb.H) else None
-            for cmd in cmds do
-                for obj in transparencyObjects cmd do
-                    let sourceCmd, objectMode = transparencyObjectBlend obj
-                    source.Px.Span.Clear()
-                    dispatchWithTransformAA source m aaSamples sourceCmd
-                    match shape with
-                    | Some shapeFb ->
-                        shapeFb.Px.Span.Clear()
-                        dispatchWithTransformAA shapeFb m aaSamples (transparencyShapeCmd obj)
-                    | None -> ()
-                    accumulateTransparencyObject group alpha fb source shape isolated objectMode
+            let alpha = if isolated && not knockout then group else getTempFb fb.W fb.H
+            if isolated && not knockout then
+                for cmd in cmds do
+                    for obj in transparencyObjects cmd do
+                        let samples, obj = transparencyObjectSampling aaSamples obj
+                        dispatchWithTransformAA group m samples obj
+            else
+                let source = getTempFb fb.W fb.H
+                let shape = if knockout then Some (getTempFb fb.W fb.H) else None
+                let mutable candidate = None
+                for cmd in cmds do
+                    for obj in transparencyObjects cmd do
+                        let samples, obj = transparencyObjectSampling aaSamples obj
+                        let sourceCmd, objectMode = transparencyObjectBlend obj
+                        source.Px.Span.Clear()
+                        dispatchWithTransformAA source m samples sourceCmd
+                        match shape with
+                        | Some shapeFb ->
+                            shapeFb.Px.Span.Clear()
+                            dispatchWithTransformAA shapeFb m samples (transparencyShapeCmd obj)
+                        | None -> ()
+                        if transparencyNeedsBackdrop obj then
+                            let candidateFb =
+                                match candidate with
+                                | Some value -> value
+                                | None ->
+                                    let value = getTempFb fb.W fb.H
+                                    candidate <- Some value
+                                    value
+                            if knockout then
+                                if isolated then candidateFb.Px.Span.Clear()
+                                else fb.Px.Span.CopyTo(candidateFb.Px.Span)
+                            else group.Px.Span.CopyTo(candidateFb.Px.Span)
+                            dispatchWithTransformAA candidateFb m samples obj
+                            accumulateTransparencyCandidate group alpha fb candidateFb source shape isolated
+                        else
+                            accumulateTransparencyObject group alpha fb source shape isolated objectMode
+                match candidate with Some candidateFb -> releaseTempFb candidateFb | None -> ()
+                match shape with Some shapeFb -> releaseTempFb shapeFb | None -> ()
+                releaseTempFb source
             let mask =
                 match maskCmds with
                 | None -> None
@@ -3280,9 +3361,7 @@ module Raster =
                     Some maskFb
             finishTransparencyGroup fb group alpha mask isolated opacity mode
             match mask with Some maskFb -> releaseTempFb maskFb | None -> ()
-            match shape with Some shapeFb -> releaseTempFb shapeFb | None -> ()
-            releaseTempFb source
-            releaseTempFb alpha
+            if not (isolated && not knockout) then releaseTempFb alpha
             releaseTempFb group
 
 

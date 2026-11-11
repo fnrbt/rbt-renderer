@@ -55,6 +55,21 @@ Raster and GL stroke expansion preserve explicit `Close`: coincident endpoints
 on an open path retain their caps; a closed path joins the seam. GL uses the
 shared stroke outlines for solid and non-solid paints.
 
+Canvas preserves positive fractional stroke widths under transforms; it does
+not clamp them to a device pixel. Exactly zero width requests a device hairline.
+An actual worker-rendered dense Form fixture and a reduced thin-stroke fixture
+verify this distinction against the native output and reference geometry.
+Raster and GL stroke expansion apply the same zero-width rule; native pixel
+checks cover hairlines under shrinking transforms without promoting positive
+fractional widths.
+
+Nested transparency groups retain the parent's working backdrop, or its initial
+backdrop for knockout. A nested group's own blend mode, mask and opacity apply
+once. Isolated non-knockout groups render their children directly into the group
+surface, avoiding per-object shape and source surfaces. Native regressions cover
+isolated/non-isolated nested boundaries, internal blending, knockout and masks;
+the original PDF transparency fixture also matches in the Chromium worker.
+
 Transparency groups on GL currently use CPU readback/compositing and upload;
 they are not a zero-readback direct-presentation path. GL rejects custom pixel
 filters, including consumer-defined luminosity/transfer masks. Raster and Canvas

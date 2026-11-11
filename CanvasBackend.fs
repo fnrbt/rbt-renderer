@@ -18,9 +18,11 @@ let private fillRuleStr = function
 let private applyStroke (ctx: CanvasRenderingContext2D) (st: StrokeStyle) =
     // PDF: width 0 = thinnest device line. Canvas draws nothing at 0,
     // so clamp to 1 device pixel (cf. pdf.js getSinglePixelWidth).
-    let det : float = emitJsExpr ctx "(function(t){return Math.abs(t.a*t.d - t.b*t.c)})(($0).getTransform())"
-    let scale = max 1e-6 (sqrt det)
-    ctx.lineWidth <- max (float st.Width) (1.0 / scale)
+    ctx.lineWidth <-
+        if st.Width = 0.0<px> then
+            let det : float = emitJsExpr ctx "(function(t){return Math.abs(t.a*t.d - t.b*t.c)})(($0).getTransform())"
+            1.0 / max 1e-6 (sqrt det)
+        else float st.Width
     ctx.lineCap <-
         match st.Cap with
         | Butt -> "butt" | Round -> "round" | Square -> "square"
@@ -149,6 +151,9 @@ let rec private groupObjects = function
     | Group (matrix, opacity, children) when opacity >= 1.0 ->
         children |> List.collect (fun child ->
             groupObjects child |> List.map (fun objectCmd -> Group (matrix, opacity, [objectCmd])))
+    | SaveRestore children
+    | AntiAlias (_, children) ->
+        children |> List.collect (fun child -> groupObjects child)
     | Mask (maskCommands, children) ->
         children |> List.collect (fun child ->
             groupObjects child |> List.map (fun objectCmd -> Mask (maskCommands, [objectCmd])))
@@ -169,6 +174,23 @@ let rec private groupObject = function
         let source, mode = groupObject child
         Mask (maskCommands, [source]), mode
     | child -> child, Normal
+
+let rec private groupNeedsBackdrop = function
+    | TransparencyGroup (isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
+    | Group (_, opacity, [child]) when opacity >= 1.0 -> groupNeedsBackdrop child
+    | Clip (_, _, [child])
+    | SaveRestore [child]
+    | AntiAlias (_, [child]) -> groupNeedsBackdrop child
+    | _ -> false
+
+// These wrappers carry graphics state, not an isolated compositing surface.
+let rec private groupStateOnly = function
+    | SaveRestore children | AntiAlias (_, children) ->
+        Group (Matrix3x2.identity, 1.0, List.map groupStateOnly children)
+    | Group (matrix, opacity, children) when opacity >= 1.0 ->
+        Group (matrix, opacity, List.map groupStateOnly children)
+    | Clip (path, rule, children) -> Clip (path, rule, List.map groupStateOnly children)
+    | child -> child
 
 // Form the new object's result against the initial backdrop, then retain the
 // prior group contribution only outside its shape. Work in premultiplied space.
@@ -255,30 +277,36 @@ let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
             if isolated then None
             else Some (snd (layerFor ctx width height))
 
-        for child in children |> List.collect groupObjects do
-            let sourceCmd, childMode = groupObject child
-            let objectLayer, objectContext = layerFor ctx width height
-            execute objectContext sourceCmd
-            let shapeLayer, shapeContext = layerFor ctx width height
-            drawShape shapeContext child
-
-            let operation = blendOperation childMode
-            if knockout then
-                let emptyBackdrop, emptyContext = layerFor ctx width height
-                let baseLayer, baseContext = defaultArg backdrop (emptyBackdrop, emptyContext)
-                let candidate, candidateContext = layerFor ctx width height
-                drawLayer candidateContext baseLayer "source-over" 1.0
-                drawLayer candidateContext objectLayer operation 1.0
-                knockoutComposite workingContext baseContext candidateContext shapeContext width height
-                match alpha with
-                | Some alphaContext -> knockoutAlpha alphaContext objectContext shapeContext width height
-                | None -> ()
-            else
-                drawLayer workingContext objectLayer operation 1.0
-            if not knockout then
-                match alpha with
-                | Some alphaContext -> drawLayer alphaContext objectLayer operation 1.0
-                | None -> ()
+        if isolated && not knockout then
+            for child in children do execute workingContext (groupStateOnly child)
+        else
+            for child in children |> List.collect groupObjects do
+                let sourceCmd, childMode = groupObject child
+                let objectLayer, objectContext = layerFor ctx width height
+                execute objectContext sourceCmd
+                let needsBackdrop = groupNeedsBackdrop child
+                let operation = blendOperation childMode
+                if knockout then
+                    let baseLayer, baseContext =
+                        match backdrop with
+                        | Some value -> value
+                        | None -> layerFor ctx width height
+                    let _, shapeContext = layerFor ctx width height
+                    drawShape shapeContext child
+                    let _, candidateContext = layerFor ctx width height
+                    drawLayer candidateContext baseLayer "source-over" 1.0
+                    if needsBackdrop then execute candidateContext child
+                    else drawLayer candidateContext objectLayer operation 1.0
+                    knockoutComposite workingContext baseContext candidateContext shapeContext width height
+                    match alpha with
+                    | Some alphaContext -> knockoutAlpha alphaContext objectContext shapeContext width height
+                    | None -> ()
+                else
+                    if needsBackdrop then execute workingContext child
+                    else drawLayer workingContext objectLayer operation 1.0
+                    match alpha with
+                    | Some alphaContext -> drawLayer alphaContext objectLayer "source-over" 1.0
+                    | None -> ()
 
         let contribution =
             match backdrop, alpha with
