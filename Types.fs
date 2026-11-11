@@ -15,6 +15,12 @@ module Types =
 
     [<Measure>] type px
 
+    /// Converts normalized, unassociated RGB components between a group's
+    /// working space and its parent's working space; alpha remains unchanged.
+    type ColorSpaceConversion =
+        { ToGroup: float -> float -> float -> struct (float * float * float)
+          ToParent: float -> float -> float -> struct (float * float * float) }
+
     [<Struct>]
     type Color = { R: byte; G: byte; B: byte; A: byte }
 
@@ -83,8 +89,12 @@ module Types =
                 let dst_rb = dst &&& 0x00FF00FFu
                 let src_ag = (src >>> 8) &&& 0x00FF00FFu
                 let dst_ag = (dst >>> 8) &&& 0x00FF00FFu
-                let out_rb = (src_rb + ((dst_rb * inv + 0x00800080u) >>> 8)) &&& 0x00FF00FFu
-                let out_ag = (src_ag + ((dst_ag * inv + 0x00800080u) >>> 8)) &&& 0x00FF00FFu
+                let inline scale pair =
+                    let biased = pair * inv + 0x00800080u
+                    // Exact rounded /255 in each 16-bit lane, not /256.
+                    ((biased + ((biased >>> 8) &&& 0x00FF00FFu)) >>> 8) &&& 0x00FF00FFu
+                let out_rb = src_rb + scale dst_rb
+                let out_ag = src_ag + scale dst_ag
                 out_rb ||| (out_ag <<< 8)
 
 #if FABLE_COMPILER

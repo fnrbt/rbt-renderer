@@ -77,6 +77,7 @@ let rec private drawShape (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
         for child in children do drawShape ctx child
         ctx.restore()
     | TransparencyGroup (_, _, _, _, _, children)
+    | ColorManagedGroup (_, _, _, _, _, _, children)
     | Blend (_, children)
     | SaveRestore children
     | Filtered (_, children) ->
@@ -176,7 +177,8 @@ let rec private groupObject = function
     | child -> child, Normal
 
 let rec private groupNeedsBackdrop = function
-    | TransparencyGroup (isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
+    | TransparencyGroup (isolated, _, _, mode, _, _)
+    | ColorManagedGroup (_, isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
     | Group (_, opacity, [child]) when opacity >= 1.0 -> groupNeedsBackdrop child
     | Clip (_, _, [child])
     | SaveRestore [child]
@@ -243,6 +245,20 @@ let private extractContribution (working: CanvasRenderingContext2D) (backdrop: C
     emitJsExpr (resultContext, pixels) "$0.putImageData($1,0,0)"
     result
 
+// ImageData exposes unassociated channels; leave alpha unchanged.
+let private convertCanvas (ctx: CanvasRenderingContext2D) width height convert =
+    let image: obj = emitJsExpr (ctx, width, height) "$0.getImageData(0,0,$1,$2)"
+    let data: obj = emitJsExpr image "$0.data"
+    for i in 0 .. 4 .. width * height * 4 - 4 do
+        let a: float = emitJsExpr (data, i) "$0[$1+3]"
+        if a > 0.0 then
+            let r: float = emitJsExpr (data, i) "$0[$1]/255"
+            let g: float = emitJsExpr (data, i) "$0[$1+1]/255"
+            let b: float = emitJsExpr (data, i) "$0[$1+2]/255"
+            let struct (r', g', b') = convert r g b
+            emitJsExpr (data, i, r', g', b') "$0[$1]=$2*255; $0[$1+1]=$3*255; $0[$1+2]=$4*255"
+    emitJsExpr (ctx, image) "$0.putImageData($1,0,0)"
+
 // ── Main interpreter ─────────────────────────────────────
 
 let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
@@ -261,66 +277,9 @@ let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
             drawLayer ctx layer "source-over" opacity
 
     | TransparencyGroup (isolated, knockout, opacity, mode, mask, children) ->
-        let width, height = canvasSize ctx
-        let backdrop =
-            if isolated then None
-            else
-                let canvas, backdropContext = layerFor ctx width height
-                // Copy the unmodified destination before any child is painted.
-                emitJsExpr (backdropContext, ctx) "$0.save(); $0.setTransform(1,0,0,1,0,0); $0.drawImage($1.canvas, 0, 0); $0.restore()"
-                Some (canvas, backdropContext)
-        let working, workingContext = layerFor ctx width height
-        match backdrop with
-        | Some (canvas, _) -> drawLayer workingContext canvas "source-over" 1.0
-        | None -> ()
-        let alpha =
-            if isolated then None
-            else Some (snd (layerFor ctx width height))
-
-        if isolated && not knockout then
-            for child in children do execute workingContext (groupStateOnly child)
-        else
-            for child in children |> List.collect groupObjects do
-                let sourceCmd, childMode = groupObject child
-                let objectLayer, objectContext = layerFor ctx width height
-                execute objectContext sourceCmd
-                let needsBackdrop = groupNeedsBackdrop child
-                let operation = blendOperation childMode
-                if knockout then
-                    let baseLayer, baseContext =
-                        match backdrop with
-                        | Some value -> value
-                        | None -> layerFor ctx width height
-                    let _, shapeContext = layerFor ctx width height
-                    drawShape shapeContext child
-                    let _, candidateContext = layerFor ctx width height
-                    drawLayer candidateContext baseLayer "source-over" 1.0
-                    if needsBackdrop then execute candidateContext child
-                    else drawLayer candidateContext objectLayer operation 1.0
-                    knockoutComposite workingContext baseContext candidateContext shapeContext width height
-                    match alpha with
-                    | Some alphaContext -> knockoutAlpha alphaContext objectContext shapeContext width height
-                    | None -> ()
-                else
-                    if needsBackdrop then execute workingContext child
-                    else drawLayer workingContext objectLayer operation 1.0
-                    match alpha with
-                    | Some alphaContext -> drawLayer alphaContext objectLayer "source-over" 1.0
-                    | None -> ()
-
-        let contribution =
-            match backdrop, alpha with
-            | Some (_, backdropContext), Some alphaContext ->
-                extractContribution workingContext backdropContext alphaContext width height
-            | _ -> working
-        match mask with
-        | Some maskCommands ->
-            let maskLayer, maskContext = layerFor ctx width height
-            for c in maskCommands do execute maskContext c
-            let sourceContext = getOffscreenContext2D contribution
-            drawLayer sourceContext maskLayer "destination-in" 1.0
-        | None -> ()
-        drawLayer ctx contribution (blendOperation mode) opacity
+        executeTransparencyGroup ctx None isolated knockout opacity mode mask children
+    | ColorManagedGroup (conversion, isolated, knockout, opacity, mode, mask, children) ->
+        executeTransparencyGroup ctx (Some conversion) isolated knockout opacity mode mask children
 
     | Clip (segs, fr, cmds) ->
         ctx.save()
@@ -470,6 +429,76 @@ let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
     | other ->
         let tag : string = emitJsExpr other "($0.tag !== undefined ? $0.tag : 'unknown')"
         warnOnce (sprintf "CanvasBackend: unsupported Cmd variant %s" tag)
+
+and private executeTransparencyGroup (ctx: CanvasRenderingContext2D) conversion isolated knockout opacity mode mask children =
+    if opacity > 0.0 && not (List.isEmpty children) then
+        let width, height = canvasSize ctx
+        let backdrop =
+            if isolated then None
+            else
+                let canvas, backdropContext = layerFor ctx width height
+                // Preserve the original group-space backdrop separately from
+                // both the parent and the mutable group working surface.
+                emitJsExpr (backdropContext, ctx) "$0.save(); $0.setTransform(1,0,0,1,0,0); $0.drawImage($1.canvas, 0, 0); $0.restore()"
+                match conversion with
+                | Some value -> convertCanvas backdropContext width height value.ToGroup
+                | None -> ()
+                Some (canvas, backdropContext)
+        let working, workingContext = layerFor ctx width height
+        match backdrop with
+        | Some (canvas, _) -> drawLayer workingContext canvas "source-over" 1.0
+        | None -> ()
+        let alpha =
+            if isolated then None
+            else Some (snd (layerFor ctx width height))
+
+        if isolated && not knockout then
+            for child in children do execute workingContext (groupStateOnly child)
+        else
+            for child in children |> List.collect groupObjects do
+                let sourceCmd, childMode = groupObject child
+                let objectLayer, objectContext = layerFor ctx width height
+                execute objectContext sourceCmd
+                let needsBackdrop = groupNeedsBackdrop child
+                let operation = blendOperation childMode
+                if knockout then
+                    let baseLayer, baseContext =
+                        match backdrop with
+                        | Some value -> value
+                        | None -> layerFor ctx width height
+                    let _, shapeContext = layerFor ctx width height
+                    drawShape shapeContext child
+                    let _, candidateContext = layerFor ctx width height
+                    drawLayer candidateContext baseLayer "source-over" 1.0
+                    if needsBackdrop then execute candidateContext child
+                    else drawLayer candidateContext objectLayer operation 1.0
+                    knockoutComposite workingContext baseContext candidateContext shapeContext width height
+                    match alpha with
+                    | Some alphaContext -> knockoutAlpha alphaContext objectContext shapeContext width height
+                    | None -> ()
+                else
+                    if needsBackdrop then execute workingContext child
+                    else drawLayer workingContext objectLayer operation 1.0
+                    match alpha with
+                    | Some alphaContext -> drawLayer alphaContext objectLayer "source-over" 1.0
+                    | None -> ()
+
+        let contribution =
+            match backdrop, alpha with
+            | Some (_, backdropContext), Some alphaContext ->
+                extractContribution workingContext backdropContext alphaContext width height
+            | _ -> working
+        let sourceContext = getOffscreenContext2D contribution
+        match conversion with
+        | Some value -> convertCanvas sourceContext width height value.ToParent
+        | None -> ()
+        match mask with
+        | Some maskCommands ->
+            let maskLayer, maskContext = layerFor ctx width height
+            for c in maskCommands do execute maskContext c
+            drawLayer sourceContext maskLayer "destination-in" 1.0
+        | None -> ()
+        drawLayer ctx contribution (blendOperation mode) opacity
 
 /// Reset transform to identity and execute all commands.
 let render (ctx: CanvasRenderingContext2D) (cmds: Cmd list) =

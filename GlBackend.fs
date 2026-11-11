@@ -819,6 +819,8 @@ void main() {
                 drawFullscreenQuad opacityShader target.Texture 0
                 releaseFbo st.FboPool target
                 restoreMainState st
+        | ColorManagedGroup _ ->
+            invalidOp "GlBackend: color-managed transparency groups require the raster backend"
         | TransparencyGroup (isolated, knockout, opacity, mode, maskCmds, children) ->
             if opacity > 0.0 && not children.IsEmpty then
                 // Keep the unmodified parent backdrop throughout object composition.
@@ -939,7 +941,7 @@ void main() {
                         renderObject commands maskFb
                         Some maskFb
                     | None -> None
-                Raster.finishTransparencyGroup backdrop group alpha mask isolated opacity mode
+                Raster.finishTransparencyGroup backdrop group alpha mask isolated opacity mode None backdrop
                 // Replace the parent with its original backdrop plus exactly one
                 // group composite (not one composite per child).
                 Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)

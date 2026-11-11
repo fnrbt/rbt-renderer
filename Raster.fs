@@ -2407,6 +2407,7 @@ module Raster =
     /// object's actual backdrop, through graphics-state-only wrappers.
     let rec transparencyNeedsBackdrop = function
         | TransparencyGroup (isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
+        | ColorManagedGroup (_, isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
         | Group (_, opacity, [child]) when opacity >= 1.0 -> transparencyNeedsBackdrop child
         | Clip (_, _, [child])
         | SaveRestore [child]
@@ -2477,6 +2478,8 @@ module Raster =
         | Group (xform, _, children) -> Group (xform, 1.0, shapeChildren children)
         | TransparencyGroup (_, _, _, _, _, children) ->
             Group (Matrix3x2.identity, 1.0, shapeChildren children)
+        | ColorManagedGroup (_, _, _, _, _, _, children) ->
+            Group (Matrix3x2.identity, 1.0, shapeChildren children)
         | Clip (path, rule, children) -> Clip (path, rule, shapeChildren children)
         | Filtered (filters, children) -> Filtered (filters, shapeChildren children)
         | FillRoundedRect (r, radius, _) -> FillRoundedRect (r, radius, Color.white)
@@ -2537,14 +2540,38 @@ module Raster =
                 let oldA = int (Pixel.a ap.[i])
                 ap.[i] <- uint32 (min 255 (sa + (oldA * inv + 127) / 255)) <<< 24
 
+    let inline private convertedChannel alpha x =
+        byte (max 0.0 (min 1.0 x) * alpha + 0.5)
+
+    let inline private extractTransparencyChannel current backdrop inv =
+        byte (max 0 (min 255 (int current - (int backdrop * inv + 127) / 255)))
+
+    /// Framebuffer pixels are premultiplied; conversions operate on straight
+    /// normalized components. Preserve the original alpha through conversion.
+    let convertTransparencyPixel convert pixel =
+        let a = Pixel.a pixel
+        if a = 0uy then 0u
+        else
+            let scale = 1.0 / float a
+            let struct (r, g, b) =
+                convert (min 1.0 (float (Pixel.r pixel) * scale))
+                        (min 1.0 (float (Pixel.g pixel) * scale))
+                        (min 1.0 (float (Pixel.b pixel) * scale))
+            let premultipliedAlpha = float a
+            Pixel.pack (convertedChannel premultipliedAlpha b)
+                       (convertedChannel premultipliedAlpha g)
+                       (convertedChannel premultipliedAlpha r) a
+
     /// Extract the group's contribution from its original backdrop before
     /// applying group-wide opacity, soft mask and blend mode exactly once.
     let finishTransparencyGroup (destination: Framebuffer) (group: Framebuffer)
                                 (alpha: Framebuffer) (mask: Framebuffer option)
-                                (isolated: bool) (opacity: float) (mode: BlendMode) =
+                                (isolated: bool) (opacity: float) (mode: BlendMode)
+                                (conversion: ColorSpaceConversion option) (groupBackdrop: Framebuffer) =
         let dp = destination.Px.Span
         let gp = group.Px.Span
         let ap = alpha.Px.Span
+        let bp = groupBackdrop.Px.Span
         for i = 0 to destination.Px.Length - 1 do
             let a = int (Pixel.a ap.[i])
             if a > 0 then
@@ -2554,8 +2581,16 @@ module Raster =
                     if isolated then current
                     else
                         let inv = 255 - a
-                        let channel get = byte (max 0 (min 255 (int (get current) - (int (get backdrop) * inv + 127) / 255)))
-                        Pixel.pack (channel Pixel.b) (channel Pixel.g) (channel Pixel.r) (byte a)
+                        let original = bp.[i]
+                        Pixel.pack
+                            (extractTransparencyChannel (Pixel.b current) (Pixel.b original) inv)
+                            (extractTransparencyChannel (Pixel.g current) (Pixel.g original) inv)
+                            (extractTransparencyChannel (Pixel.r current) (Pixel.r original) inv)
+                            (byte a)
+                let source =
+                    match conversion with
+                    | Some value -> convertTransparencyPixel value.ToParent source
+                    | None -> source
                 let maskAlpha =
                     match mask with
                     | Some maskFb -> float (Pixel.a maskFb.Px.Span.[i]) / 255.0
@@ -2938,7 +2973,9 @@ module Raster =
                         fpx.[i] <- blendPx sc fpx.[i]
                 releaseTempFb tmp
         | TransparencyGroup (isolated, knockout, opacity, mode, mask, cmds) ->
-            dispatchTransparencyGroup fb m 0 isolated knockout opacity mode mask cmds
+            dispatchTransparencyGroup fb m 0 None isolated knockout opacity mode mask cmds
+        | ColorManagedGroup (conversion, isolated, knockout, opacity, mode, mask, cmds) ->
+            dispatchTransparencyGroup fb m 0 (Some conversion) isolated knockout opacity mode mask cmds
         | Clip (clipSegs, fillRule, cmds) ->
             let clipSegs' = clipSegs |> List.map (transformPathSeg m)
             match tryRectClip clipSegs' with
@@ -3208,7 +3245,9 @@ module Raster =
                             fpx.[i] <- blendPx sc fpx.[i]
                     releaseTempFb tmp
             | TransparencyGroup (isolated, knockout, opacity, mode, mask, cmds) ->
-                dispatchTransparencyGroup fb m aaSamples isolated knockout opacity mode mask cmds
+                dispatchTransparencyGroup fb m aaSamples None isolated knockout opacity mode mask cmds
+            | ColorManagedGroup (conversion, isolated, knockout, opacity, mode, mask, cmds) ->
+                dispatchTransparencyGroup fb m aaSamples (Some conversion) isolated knockout opacity mode mask cmds
             | PathBool (op, segsA, segsB, paint, fillRule) ->
                 let paint' = transformPaint m paint
                 let segsA' = segsA |> List.map (transformPathSeg m)
@@ -3307,11 +3346,19 @@ module Raster =
                                     | _ -> scanlineFillPaintAA fb contours paint' aaSamples NonZero
             | _ -> dispatchWithTransform fb m cmd
     and dispatchTransparencyGroup (fb: Framebuffer) (m: Matrix3x2) (aaSamples: int)
-                                  (isolated: bool) (knockout: bool) (opacity: float)
+                                  (conversion: ColorSpaceConversion option) (isolated: bool) (knockout: bool) (opacity: float)
                                   (mode: BlendMode) (maskCmds: Cmd list option) (cmds: Cmd list) =
         if opacity > 0.0 && not cmds.IsEmpty then
+            let groupBackdrop =
+                match conversion with
+                | Some value when not isolated ->
+                    let converted = getTempFb fb.W fb.H
+                    for i = 0 to fb.Px.Length - 1 do
+                        converted.Px.Span.[i] <- convertTransparencyPixel value.ToGroup fb.Px.Span.[i]
+                    converted
+                | _ -> fb
             let group = getTempFb fb.W fb.H
-            if not isolated then fb.Px.Span.CopyTo(group.Px.Span)
+            if not isolated then groupBackdrop.Px.Span.CopyTo(group.Px.Span)
             let alpha = if isolated && not knockout then group else getTempFb fb.W fb.H
             if isolated && not knockout then
                 for cmd in cmds do
@@ -3343,12 +3390,12 @@ module Raster =
                                     value
                             if knockout then
                                 if isolated then candidateFb.Px.Span.Clear()
-                                else fb.Px.Span.CopyTo(candidateFb.Px.Span)
+                                else groupBackdrop.Px.Span.CopyTo(candidateFb.Px.Span)
                             else group.Px.Span.CopyTo(candidateFb.Px.Span)
                             dispatchWithTransformAA candidateFb m samples obj
-                            accumulateTransparencyCandidate group alpha fb candidateFb source shape isolated
+                            accumulateTransparencyCandidate group alpha groupBackdrop candidateFb source shape isolated
                         else
-                            accumulateTransparencyObject group alpha fb source shape isolated objectMode
+                            accumulateTransparencyObject group alpha groupBackdrop source shape isolated objectMode
                 match candidate with Some candidateFb -> releaseTempFb candidateFb | None -> ()
                 match shape with Some shapeFb -> releaseTempFb shapeFb | None -> ()
                 releaseTempFb source
@@ -3359,10 +3406,11 @@ module Raster =
                     let maskFb = getTempFb fb.W fb.H
                     children |> List.iter (dispatchWithTransformAA maskFb m aaSamples)
                     Some maskFb
-            finishTransparencyGroup fb group alpha mask isolated opacity mode
+            finishTransparencyGroup fb group alpha mask isolated opacity mode conversion groupBackdrop
             match mask with Some maskFb -> releaseTempFb maskFb | None -> ()
             if not (isolated && not knockout) then releaseTempFb alpha
             releaseTempFb group
+            if not isolated && conversion.IsSome then releaseTempFb groupBackdrop
 
 
     let dispatch (fb: Framebuffer) (cmd: Cmd) =
@@ -3404,6 +3452,7 @@ module Raster =
                 | StrokePath(_, style) -> "StrokePath:" + paintKind style.Paint
                 | Group _ -> "Group"
                 | TransparencyGroup _ -> "TransparencyGroup"
+                | ColorManagedGroup _ -> "ColorManagedGroup"
                 | Clip _ -> "Clip"
                 | Filtered _ -> "Filtered"
                 | FillRoundedRect _ -> "FillRoundedRect"

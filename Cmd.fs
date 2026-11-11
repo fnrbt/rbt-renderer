@@ -13,6 +13,9 @@ type Cmd =
     /// Composite children as independent objects, then composite the group once.
     /// The optional mask modulates the group's contribution, not its backdrop.
     | TransparencyGroup of isolated: bool * knockout: bool * opacity: float * mode: BlendMode * mask: Cmd list option * cmds: Cmd list
+    /// Children are already encoded in the group's working space. Convert only
+    /// the group's source contribution at its parent-space compositing boundary.
+    | ColorManagedGroup of conversion: ColorSpaceConversion * isolated: bool * knockout: bool * opacity: float * mode: BlendMode * mask: Cmd list option * cmds: Cmd list
     | Clip of clipPath: PathSeg list * fillRule: FillRule * cmds: Cmd list
     | Filtered of filters: Filter list * cmds: Cmd list
     | FillRoundedRect of Rect * cornerRadius: float<px> * Color

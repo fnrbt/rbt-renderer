@@ -70,10 +70,23 @@ surface, avoiding per-object shape and source surfaces. Native regressions cover
 isolated/non-isolated nested boundaries, internal blending, knockout and masks;
 the original PDF transparency fixture also matches in the Chromium worker.
 
+`ColorManagedGroup` adds explicit `ColorSpaceConversion.ToGroup`/`ToParent`
+callbacks on normalized straight RGB components. Child paints already contain
+the group's encoded components; ICC/PDF interpretation remains outside Renderer.
+Raster and Canvas convert the initial backdrop into group space, extract the
+group-only contribution there, then convert that contribution into parent space
+before boundary blend mode, opacity and mask. Untouched parent pixels do not
+make a color-space round trip. Ordinary `TransparencyGroup` inherits its
+parent's working space.
+
+Packed source-over uses exact rounded division by 255 in both channel pairs;
+the former division-by-256 approximation could reduce opaque alpha to 254.
+
 Transparency groups on GL currently use CPU readback/compositing and upload;
-they are not a zero-readback direct-presentation path. GL rejects custom pixel
-filters, including consumer-defined luminosity/transfer masks. Raster and Canvas
-support those filters. Knockout shape extraction is approximate for expanding
+they are not a zero-readback direct-presentation path. GL explicitly rejects
+`ColorManagedGroup` and custom pixel filters, including consumer-defined
+luminosity/transfer masks; use Raster or Canvas for those commands.
+Knockout shape extraction is approximate for expanding
 filters, text represented as masks and intrinsic image alpha.
 
 Verification for this change covers native raster pixels and Chromium Canvas,
