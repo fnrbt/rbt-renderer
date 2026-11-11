@@ -112,6 +112,7 @@ module Gl =
     let GL_TRUE               = 1
     let GL_STENCIL_TEST       = 0x0B90
     let GL_ALWAYS             = 0x0207
+    let GL_LESS               = 0x0201
     let GL_EQUAL              = 0x0202
     let GL_NOTEQUAL           = 0x0205
     let GL_KEEP               = 0x1E00

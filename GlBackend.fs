@@ -34,6 +34,7 @@ void main() {
           mutable Fbo: int; mutable ColorRb: int; mutable StencilRb: int
           mutable FboPool: FboPool
           mutable ActiveFbo: int
+          mutable ActiveClips: ((float * float) list list * FillRule) list
           mutable TextAtlasTex: int
           mutable TexCache: System.Collections.Generic.Dictionary<uint32[], int> }
 
@@ -139,25 +140,90 @@ void main() {
                 if y > maxY then maxY <- y
         (minX, minY, maxX, maxY)
 
+    // Bit 7 belongs to the current intersection of all enclosing clips.
+    // Path fills use the lower seven bits for winding/parity so their clears
+    // never destroy a parent clip. On pop, replay only the enclosing clips.
+    let private shapeStencilMask (st: GlState) =
+        if st.ActiveClips.IsEmpty then 0xFFu else 0x7Fu
+
+    let private beginShapeStencil (st: GlState) (rule: FillRule) =
+        let mask = shapeStencilMask st
+        Gl.glEnable(Gl.GL_STENCIL_TEST)
+        Gl.glColorMask(false, false, false, false)
+        Gl.glStencilMask(mask)
+        Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
+        Gl.glStencilFunc(Gl.GL_ALWAYS, 0, int mask)
+        match rule with
+        | EvenOdd -> Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
+        | NonZero ->
+            Gl.glStencilOpSeparate(Gl.GL_FRONT, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INCR_WRAP)
+            Gl.glStencilOpSeparate(Gl.GL_BACK, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_DECR_WRAP)
+
+    let private coverShapeStencil (st: GlState) =
+        Gl.glColorMask(true, true, true, true)
+        if st.ActiveClips.IsEmpty then Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
+        else Gl.glStencilFunc(Gl.GL_LESS, 0x80, 0xFF)
+        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+
+    let private finishShapeStencil (st: GlState) =
+        if st.ActiveClips.IsEmpty then Gl.glDisable(Gl.GL_STENCIL_TEST)
+        else
+            Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0x80)
+            Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_KEEP)
+
+    let private writeClipStencil (st: GlState) (contours: (float * float) list list) (rule: FillRule) (first: bool) =
+        Gl.glUseProgram(st.Program)
+        Gl.glBindBuffer(Gl.GL_ARRAY_BUFFER, st.Vbo)
+        Gl.glEnableVertexAttribArray(st.LocPos)
+        Gl.glVertexAttribPointer(st.LocPos, 2, Gl.GL_FLOAT, false, 0, nativeint 0)
+        setMVP st (ortho (float32 st.W) (float32 st.H))
+        Gl.glEnable(Gl.GL_STENCIL_TEST)
+        Gl.glColorMask(false, false, false, false)
+        if first then
+            Gl.glStencilMask(0xFFu)
+            Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
+            Gl.glStencilMask(0x80u)
+            Gl.glStencilFunc(Gl.GL_ALWAYS, 0x80, 0x80)
+            Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_REPLACE)
+            drawTriangles st (rectVerts 0.0 0.0 (float st.W) (float st.H))
+        Gl.glStencilMask(0x7Fu)
+        Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
+        Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0x7F)
+        match rule with
+        | EvenOdd -> Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
+        | NonZero ->
+            Gl.glStencilOpSeparate(Gl.GL_FRONT, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INCR_WRAP)
+            Gl.glStencilOpSeparate(Gl.GL_BACK, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_DECR_WRAP)
+        for contour in contours do
+            if contour.Length >= 3 then
+                let verts = Array.zeroCreate<float32> (contour.Length * 2)
+                let mutable i = 0
+                for (x, y) in contour do
+                    verts.[i] <- float32 x; verts.[i+1] <- float32 y; i <- i + 2
+                drawTriangleFan st verts
+        // Clear the parent-clip bit wherever the new path has no coverage.
+        Gl.glStencilMask(0x80u)
+        Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0x7F)
+        Gl.glStencilOp(Gl.GL_ZERO, Gl.GL_ZERO, Gl.GL_KEEP)
+        drawTriangles st (rectVerts 0.0 0.0 (float st.W) (float st.H))
+        Gl.glColorMask(true, true, true, true)
+        Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0x80)
+        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_KEEP)
+
+    let private replayClipStencil (st: GlState) =
+        match List.rev st.ActiveClips with
+        | [] -> Gl.glDisable(Gl.GL_STENCIL_TEST)
+        | (firstContours, firstRule) :: rest ->
+            writeClipStencil st firstContours firstRule true
+            for contours, rule in rest do writeClipStencil st contours rule false
+
     // Stencil-then-cover path fill
     let stencilFillContours (st: GlState) (contours: (float * float) list list) (fillRule: FillRule) (c: Color) (mvp: float32[]) =
         if contours.IsEmpty then () else
         setMVP st mvp
 
-        // Phase 1: write stencil
-        Gl.glEnable(Gl.GL_STENCIL_TEST)
-        Gl.glColorMask(false, false, false, false)
-        Gl.glStencilMask(0xFFu)
-        Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
-
-        match fillRule with
-        | EvenOdd ->
-            Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-            Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
-        | NonZero ->
-            Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-            Gl.glStencilOpSeparate(Gl.GL_FRONT, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INCR_WRAP)
-            Gl.glStencilOpSeparate(Gl.GL_BACK, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_DECR_WRAP)
+        // Phase 1: write shape winding without clearing any enclosing clip.
+        beginShapeStencil st fillRule
 
         // Draw triangle fans for each contour
         for contour in contours do
@@ -169,17 +235,15 @@ void main() {
                     i <- i + 2
                 drawTriangleFan st verts
 
-        // Phase 2: cover (draw bounding box where stencil != 0)
-        Gl.glColorMask(true, true, true, true)
-        Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+        // Phase 2: cover only where both the shape and parent clip are set.
+        coverShapeStencil st
 
         setColor st c
         let (minX, minY, maxX, maxY) = contourBBox contours
         let coverVerts = rectVerts (minX - 1.0) (minY - 1.0) (maxX - minX + 2.0) (maxY - minY + 2.0)
         drawTriangles st coverVerts
 
-        Gl.glDisable(Gl.GL_STENCIL_TEST)
+        finishShapeStencil st
 
     // Stencil-then-cover with a gradient shader for the cover pass
     let stencilFillContoursGradient (st: GlState) (contours: (float * float) list list) (fillRule: FillRule) (shader: GlslCompiler.CompiledShader) (mvp: float32[]) =
@@ -188,19 +252,7 @@ void main() {
         // Phase 1: write stencil using the solid-color program (color mask is off anyway)
         Gl.glUseProgram(st.Program)
         setMVP st mvp
-        Gl.glEnable(Gl.GL_STENCIL_TEST)
-        Gl.glColorMask(false, false, false, false)
-        Gl.glStencilMask(0xFFu)
-        Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
-
-        match fillRule with
-        | EvenOdd ->
-            Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-            Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
-        | NonZero ->
-            Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-            Gl.glStencilOpSeparate(Gl.GL_FRONT, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INCR_WRAP)
-            Gl.glStencilOpSeparate(Gl.GL_BACK, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_DECR_WRAP)
+        beginShapeStencil st fillRule
 
         for contour in contours do
             if contour.Length >= 3 then
@@ -217,9 +269,7 @@ void main() {
         // Rebind vertex attribute for gradient program
         Gl.glEnableVertexAttribArray(shader.LocPos)
 
-        Gl.glColorMask(true, true, true, true)
-        Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+        coverShapeStencil st
 
         let (minX, minY, maxX, maxY) = contourBBox contours
         let coverVerts = rectVerts (minX - 1.0) (minY - 1.0) (maxX - minX + 2.0) (maxY - minY + 2.0)
@@ -232,7 +282,7 @@ void main() {
         Gl.glEnableVertexAttribArray(st.LocPos)
         Gl.glVertexAttribPointer(st.LocPos, 2, Gl.GL_FLOAT, false, 0, nativeint 0)
 
-        Gl.glDisable(Gl.GL_STENCIL_TEST)
+        finishShapeStencil st
 
     // Stencil-then-cover with image paint shader for the cover pass
     let stencilFillContoursImage (st: GlState) (contours: (float * float) list list) (fillRule: FillRule) (shader: GlslCompiler.ImagePaintShader) (tex: int) (invXform: Matrix3x2) (texW: int) (texH: int) (mvp: float32[]) =
@@ -241,19 +291,7 @@ void main() {
         // Phase 1: write stencil using the solid-color program
         Gl.glUseProgram(st.Program)
         setMVP st mvp
-        Gl.glEnable(Gl.GL_STENCIL_TEST)
-        Gl.glColorMask(false, false, false, false)
-        Gl.glStencilMask(0xFFu)
-        Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
-
-        match fillRule with
-        | EvenOdd ->
-            Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-            Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
-        | NonZero ->
-            Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-            Gl.glStencilOpSeparate(Gl.GL_FRONT, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INCR_WRAP)
-            Gl.glStencilOpSeparate(Gl.GL_BACK, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_DECR_WRAP)
+        beginShapeStencil st fillRule
 
         for contour in contours do
             if contour.Length >= 3 then
@@ -280,9 +318,7 @@ void main() {
         if shader.LocTexSize >= 0 then Gl.glUniform2f(shader.LocTexSize, float32 texW, float32 texH)
         Gl.glEnableVertexAttribArray(shader.LocPos)
 
-        Gl.glColorMask(true, true, true, true)
-        Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+        coverShapeStencil st
 
         let (minX, minY, maxX, maxY) = contourBBox contours
         let coverVerts = rectVerts (minX - 1.0) (minY - 1.0) (maxX - minX + 2.0) (maxY - minY + 2.0)
@@ -294,7 +330,7 @@ void main() {
         Gl.glUseProgram(st.Program)
         Gl.glEnableVertexAttribArray(st.LocPos)
         Gl.glVertexAttribPointer(st.LocPos, 2, Gl.GL_FLOAT, false, 0, nativeint 0)
-        Gl.glDisable(Gl.GL_STENCIL_TEST)
+        finishShapeStencil st
 
     // Stroke via line strips (GL_LINE_STRIP per contour, with width)
     let strokeContours (st: GlState) (contours: (float * float) list list) (width: float) (c: Color) (mvp: float32[]) =
@@ -410,6 +446,14 @@ void main() {
         Gl.glBindTexture(Gl.GL_TEXTURE_2D, 0)
         Gl.glActiveTexture(Gl.GL_TEXTURE0)
 
+    let private restoreParentStencil active =
+        if active then
+            Gl.glEnable(Gl.GL_STENCIL_TEST)
+            Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0x80)
+            Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_KEEP)
+        else
+            Gl.glDisable(Gl.GL_STENCIL_TEST)
+
     let uploadTexture (fb: Framebuffer) : int =
         let mutable tex = 0
         Gl.glGenTextures(1, &tex)
@@ -495,19 +539,7 @@ void main() {
         // Phase 1: write stencil using the solid-color program
         Gl.glUseProgram(st.Program)
         setMVP st mvp
-        Gl.glEnable(Gl.GL_STENCIL_TEST)
-        Gl.glColorMask(false, false, false, false)
-        Gl.glStencilMask(0xFFu)
-        Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
-
-        match fillRule with
-        | EvenOdd ->
-            Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-            Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
-        | NonZero ->
-            Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-            Gl.glStencilOpSeparate(Gl.GL_FRONT, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INCR_WRAP)
-            Gl.glStencilOpSeparate(Gl.GL_BACK, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_DECR_WRAP)
+        beginShapeStencil st fillRule
 
         for contour in contours do
             if contour.Length >= 3 then
@@ -536,9 +568,7 @@ void main() {
         if shader.LocTexSize >= 0 then Gl.glUniform2f(shader.LocTexSize, float32 texW, float32 texH)
         Gl.glEnableVertexAttribArray(shader.LocPos)
 
-        Gl.glColorMask(true, true, true, true)
-        Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+        coverShapeStencil st
 
         let (minX, minY, maxX, maxY) = contourBBox contours
         let coverVerts = rectVerts (minX - 1.0) (minY - 1.0) (maxX - minX + 2.0) (maxY - minY + 2.0)
@@ -553,7 +583,7 @@ void main() {
         Gl.glUseProgram(st.Program)
         Gl.glEnableVertexAttribArray(st.LocPos)
         Gl.glVertexAttribPointer(st.LocPos, 2, Gl.GL_FLOAT, false, 0, nativeint 0)
-        Gl.glDisable(Gl.GL_STENCIL_TEST)
+        finishShapeStencil st
 
     /// Unified paint dispatch for stencil-then-cover. Returns true if handled.
     let stencilFillContoursWithPaint (st: GlState) (contours: (float * float) list list) (fillRule: FillRule) (paint: Paint) (mvp: float32[]) : bool =
@@ -667,7 +697,8 @@ void main() {
             for x = 0 to fb.W - 1 do
                 let offset = row + x * 4
                 pixels.[y * fb.W + x] <- Pixel.pack bytes.[offset + 2] bytes.[offset + 1] bytes.[offset] bytes.[offset + 3]
-    let private uploadTransparencyPixels (fb: Framebuffer) (bytes: byte[]) =
+    /// Write top-left, packed premultiplied BGRA pixels as bottom-up GL RGBA.
+    let private writeTransparencyBytes (fb: Framebuffer) (bytes: byte[]) =
         let pixels = fb.Px.Span
         for y = 0 to fb.H - 1 do
             let row = (fb.H - 1 - y) * fb.W * 4
@@ -678,6 +709,9 @@ void main() {
                 bytes.[offset + 1] <- Pixel.g px
                 bytes.[offset + 2] <- Pixel.b px
                 bytes.[offset + 3] <- Pixel.a px
+
+    let private uploadTransparencyPixels (fb: Framebuffer) (bytes: byte[]) =
+        writeTransparencyBytes fb bytes
         let mutable texture = 0
         Gl.glGenTextures(1, &texture)
         Gl.glBindTexture(Gl.GL_TEXTURE_2D, texture)
@@ -690,23 +724,60 @@ void main() {
         Gl.glTexParameteri(Gl.GL_TEXTURE_2D, Gl.GL_TEXTURE_WRAP_T, Gl.GL_CLAMP_TO_EDGE)
         texture
 
+    /// CPU callbacks use the same full-frame, top-left BGRA PixelPass contract
+    /// as Raster. Keep adjacent passes on the CPU and upload only at the next
+    /// GPU pass (or the final composite).
+    let private runCustomPass w h sourceFbo hasPending (pending: uint32[]) (bytes: byte[]) (pass: PixelPass) =
+        if not hasPending then
+            let pixels = Array.zeroCreate<uint32> (w * h)
+            let buffer = Array.zeroCreate<byte> (w * h * 4)
+            Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, sourceFbo)
+            readTransparencyPixels (Framebuffer.ofArray pixels w h) buffer
+            pass w h pixels, buffer
+        else
+            pass w h pending, bytes
+
+    let private flushCustomPixels texture w h hasPending (pixels: uint32[]) (bytes: byte[]) =
+        if hasPending then
+            writeTransparencyBytes (Framebuffer.ofArray pixels w h) bytes
+            Gl.glBindTexture(Gl.GL_TEXTURE_2D, texture)
+            let handle = GCHandle.Alloc(bytes, GCHandleType.Pinned)
+            try Gl.glTexSubImage2D(Gl.GL_TEXTURE_2D, 0, 0, 0, w, h, Gl.GL_RGBA, Gl.GL_UNSIGNED_BYTE, handle.AddrOfPinnedObject())
+            finally handle.Free()
+            Gl.glBindTexture(Gl.GL_TEXTURE_2D, 0)
+
 
     let rec renderToOffscreen (st: GlState) (orthoBase: float32[]) (m: Matrix3x2) (softFb: Framebuffer) (cmds: Cmd list) (w: int) (h: int) : OffscreenTarget =
         let savedFbo = st.ActiveFbo
+        let savedClips = st.ActiveClips
+        let clipActive = Gl.glIsEnabled(Gl.GL_STENCIL_TEST) <> 0uy
         let target = acquireFbo st.FboPool
         st.ActiveFbo <- target.Fbo
-        Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, target.Fbo)
-        Gl.glViewport(0, 0, w, h)
-        Gl.glClearColor(0.0f, 0.0f, 0.0f, 0.0f)
-        Gl.glClear(Gl.GL_COLOR_BUFFER_BIT ||| Gl.GL_STENCIL_BUFFER_BIT)
-        // Re-setup state for rendering into offscreen
-        Gl.glUseProgram(st.Program)
-        Gl.glBindBuffer(Gl.GL_ARRAY_BUFFER, st.Vbo)
-        Gl.glEnableVertexAttribArray(st.LocPos)
-        Gl.glVertexAttribPointer(st.LocPos, 2, Gl.GL_FLOAT, false, 0, nativeint 0)
-        cmds |> List.iter (dispatch st orthoBase m softFb)
-        st.ActiveFbo <- savedFbo
-        target
+        st.ActiveClips <- []
+        try
+            Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, target.Fbo)
+            Gl.glViewport(0, 0, w, h)
+            Gl.glClearColor(0.0f, 0.0f, 0.0f, 0.0f)
+            Gl.glClear(Gl.GL_COLOR_BUFFER_BIT ||| Gl.GL_STENCIL_BUFFER_BIT)
+            // Parent stencil belongs to its FBO. Render an un-clipped layer;
+            // the parent clip is applied when the layer is composited.
+            Gl.glDisable(Gl.GL_STENCIL_TEST)
+            Gl.glUseProgram(st.Program)
+            Gl.glBindBuffer(Gl.GL_ARRAY_BUFFER, st.Vbo)
+            Gl.glEnableVertexAttribArray(st.LocPos)
+            Gl.glVertexAttribPointer(st.LocPos, 2, Gl.GL_FLOAT, false, 0, nativeint 0)
+            cmds |> List.iter (dispatch st orthoBase m softFb)
+            st.ActiveFbo <- savedFbo
+            st.ActiveClips <- savedClips
+            restoreParentStencil clipActive
+            target
+        with _ ->
+            st.ActiveFbo <- savedFbo
+            st.ActiveClips <- savedClips
+            releaseFbo st.FboPool target
+            restoreMainState st
+            restoreParentStencil clipActive
+            reraise()
 
     and dispatch (st: GlState) (orthoBase: float32[]) (m: Matrix3x2) (softFb: Framebuffer) (cmd: Cmd) =
         let mvp = transformToMat4 m orthoBase
@@ -726,9 +797,17 @@ void main() {
                 Gl.glViewport(0, 0, st.W, st.H)
                 restoreMainState st
         | Clear c ->
-            let pm = Color.toPremul c
-            Gl.glClearColor(float32 pm.R / 255.0f, float32 pm.G / 255.0f, float32 pm.B / 255.0f, float32 pm.A / 255.0f)
-            Gl.glClear(Gl.GL_COLOR_BUFFER_BIT)
+            if st.ActiveClips.IsEmpty then
+                let pm = Color.toPremul c
+                Gl.glClearColor(float32 pm.R / 255.0f, float32 pm.G / 255.0f, float32 pm.B / 255.0f, float32 pm.A / 255.0f)
+                Gl.glClear(Gl.GL_COLOR_BUFFER_BIT)
+            else
+                // glClear ignores stencil; replace only the active clip region.
+                setMVP st orthoBase
+                setColor st c
+                Gl.glDisable(Gl.GL_BLEND)
+                drawTriangles st (rectVerts 0.0 0.0 (float st.W) (float st.H))
+                Gl.glEnable(Gl.GL_BLEND)
             // Keep softFb transparent - only software fallback commands write to it
 
         | FillRect (r, c) ->
@@ -906,8 +985,10 @@ void main() {
                         scratch.Px.Span.Clear()
                         let savedFbo = st.ActiveFbo
                         let target = acquireFbo st.FboPool
+                        let savedClips = st.ActiveClips
                         st.ActiveFbo <- target.Fbo
                         Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, target.Fbo)
+                        st.ActiveClips <- []
                         Gl.glViewport(0, 0, st.W, st.H)
                         Gl.glClearColor(0.0f, 0.0f, 0.0f, 0.0f)
                         Gl.glClear(Gl.GL_COLOR_BUFFER_BIT ||| Gl.GL_STENCIL_BUFFER_BIT)
@@ -917,7 +998,8 @@ void main() {
                         drawFullscreenQuad (GlslCompiler.buildPassthroughShader ()) texture 0
                         deleteTexture texture
                         restoreMainState st
-                        dispatch st orthoBase m scratch obj
+                        try dispatch st orthoBase m scratch obj
+                        finally st.ActiveClips <- savedClips
                         Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, target.Fbo)
                         readTransparencyPixels candidate pixels
                         let dest = candidate.Px.Span
@@ -964,10 +1046,7 @@ void main() {
                 // Replace the parent with its original backdrop plus exactly one
                 // group composite (not one composite per child).
                 Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
-                if clipActive then
-                    Gl.glEnable(Gl.GL_STENCIL_TEST)
-                    Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-                    Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_KEEP)
+                restoreParentStencil clipActive
                 let texture = uploadTransparencyPixels backdrop pixels
                 Gl.glDisable(Gl.GL_BLEND)
                 drawFullscreenQuad (GlslCompiler.buildPassthroughShader ()) texture 0
@@ -1098,8 +1177,10 @@ void main() {
             let shadowContours = Raster.flattenPath shadowSegs
             // Step 1: Render solid color fill to offscreen FBO
             let savedFbo = st.ActiveFbo
+            let savedClips = st.ActiveClips
             let shadowTarget = acquireFbo st.FboPool
             st.ActiveFbo <- shadowTarget.Fbo
+            st.ActiveClips <- []
             Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, shadowTarget.Fbo)
             Gl.glViewport(0, 0, st.W, st.H)
             Gl.glClearColor(0.0f, 0.0f, 0.0f, 0.0f)
@@ -1142,6 +1223,7 @@ void main() {
                     tempTargets <- vT :: tempTargets
             // Step 3: Stencil-mask with original rect path
             st.ActiveFbo <- savedFbo
+            st.ActiveClips <- savedClips
             Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, savedFbo)
             // Build original rect path for clip mask
             let origSegs =
@@ -1171,12 +1253,7 @@ void main() {
             // Write original rect to stencil
             let identityMvp = orthoBase
             setMVP st identityMvp
-            Gl.glEnable(Gl.GL_STENCIL_TEST)
-            Gl.glColorMask(false, false, false, false)
-            Gl.glStencilMask(0xFFu)
-            Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
-            Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-            Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
+            beginShapeStencil st EvenOdd
             for contour in transformedOrigContours do
                 if contour.Length >= 3 then
                     let verts = Array.zeroCreate<float32> (contour.Length * 2)
@@ -1185,15 +1262,17 @@ void main() {
                     drawTriangleFan st verts
             // Step 4: Composite blurred shadow where stencil test passes
             Gl.glColorMask(true, true, true, true)
-            // Outset: draw outside original (stencil == 0), Inset: draw inside (stencil != 0)
+            // Outset: clip minus the shape; inset: clip intersect the shape.
             if inset then
-                Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
+                if st.ActiveClips.IsEmpty then Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
+                else Gl.glStencilFunc(Gl.GL_LESS, 0x80, 0xFF)
             else
-                Gl.glStencilFunc(Gl.GL_EQUAL, 0, 0xFF)
+                if st.ActiveClips.IsEmpty then Gl.glStencilFunc(Gl.GL_EQUAL, 0, 0xFF)
+                else Gl.glStencilFunc(Gl.GL_EQUAL, 0x80, 0xFF)
             Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
             let passthrough = GlslCompiler.buildPassthroughShader ()
             drawFullscreenQuad passthrough currentTarget.Texture 0
-            Gl.glDisable(Gl.GL_STENCIL_TEST)
+            finishShapeStencil st
             // Cleanup
             for t in tempTargets do releaseFbo st.FboPool t
             restoreMainState st
@@ -1234,12 +1313,7 @@ void main() {
                 if allSameColor && top.Style <> NoBorder then
                     // Stencil: outer (increment) then inner (decrement), cover where stencil=1
                     setMVP st mvp
-                    Gl.glEnable(Gl.GL_STENCIL_TEST)
-                    Gl.glColorMask(false, false, false, false)
-                    Gl.glStencilMask(0xFFu)
-                    Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
-                    Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-                    Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
+                    beginShapeStencil st EvenOdd
                     // Draw outer contours
                     for contour in outerContours do
                         if contour.Length >= 3 then
@@ -1255,13 +1329,11 @@ void main() {
                             for (x, y) in contour do verts.[i] <- float32 x; verts.[i+1] <- float32 y; i <- i + 2
                             drawTriangleFan st verts
                     // Cover
-                    Gl.glColorMask(true, true, true, true)
-                    Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-                    Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+                    coverShapeStencil st
                     setColor st top.Color
                     let coverVerts = rectVerts x0 y0 w h
                     drawTriangles st coverVerts
-                    Gl.glDisable(Gl.GL_STENCIL_TEST)
+                    finishShapeStencil st
                 else
                     // Per-side colors: render each side separately using stencil
                     let cx = x0 + w / 2.0
@@ -1270,12 +1342,7 @@ void main() {
                     let y1 = y0 + h
                     // Write border ring to stencil (outer XOR inner)
                     let writeBorderRingToStencil () =
-                        Gl.glEnable(Gl.GL_STENCIL_TEST)
-                        Gl.glColorMask(false, false, false, false)
-                        Gl.glStencilMask(0xFFu)
-                        Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
-                        Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-                        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
+                        beginShapeStencil st EvenOdd
                         setMVP st mvp
                         for contour in outerContours do
                             if contour.Length >= 3 then
@@ -1293,16 +1360,12 @@ void main() {
                     let renderSide (side: BorderSide) (triVerts: float32[]) =
                         if side.Style <> NoBorder && side.Width > 0.0<px> then
                             writeBorderRingToStencil ()
-                            // AND with triangle clip: write triangle to stencil bit 0x80, then test ring AND triangle
-                            // Simpler approach: just render border ring within triangle clip
-                            // Use stencil value 1 from ring, then cover only within triangle by using the triangle as geometry
-                            Gl.glColorMask(true, true, true, true)
-                            Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-                            Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
-                            // Enable scissor-like clipping via the triangle: just draw the triangle with stencil test
+                            // Intersect the border ring and enclosing clip in
+                            // stencil; side geometry supplies the third boundary.
+                            coverShapeStencil st
                             setColor st side.Color
                             drawTriangles st triVerts
-                            Gl.glDisable(Gl.GL_STENCIL_TEST)
+                            finishShapeStencil st
                     // Top side: triangle from center to top-left and top-right corners
                     renderSide top [| float32 cx; float32 cy; float32 x0; float32 y0; float32 x1; float32 y0 |]
                     // Right side: triangle from center to top-right and bottom-right corners
@@ -1341,12 +1404,7 @@ void main() {
                 let innerContours = Raster.flattenPath innerSegs
                 // Helper: write border ring to stencil
                 let writeBorderRing () =
-                    Gl.glEnable(Gl.GL_STENCIL_TEST)
-                    Gl.glColorMask(false, false, false, false)
-                    Gl.glStencilMask(0xFFu)
-                    Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
-                    Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-                    Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
+                    beginShapeStencil st EvenOdd
                     setMVP st mvp
                     for contour in outerContours do
                         if contour.Length >= 3 then
@@ -1367,12 +1425,10 @@ void main() {
                     match side.Style with
                     | BorderSolid ->
                         writeBorderRing ()
-                        Gl.glColorMask(true, true, true, true)
-                        Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-                        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+                        coverShapeStencil st
                         setColor st side.Color
                         drawTriangles st sideTriVerts
-                        Gl.glDisable(Gl.GL_STENCIL_TEST)
+                        finishShapeStencil st
                     | BorderDashed ->
                         // Generate dash rectangles along the edge, stencil-fill within border ring
                         let dashLen = sw * 3.0
@@ -1388,12 +1444,10 @@ void main() {
                             dashRects.Add(rv)
                             pos <- pos + dashLen * 2.0
                         writeBorderRing ()
-                        Gl.glColorMask(true, true, true, true)
-                        Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-                        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+                        coverShapeStencil st
                         setColor st side.Color
                         for rv in dashRects do drawTriangles st rv
-                        Gl.glDisable(Gl.GL_STENCIL_TEST)
+                        finishShapeStencil st
                     | BorderDotted ->
                         let dotSpacing = sw
                         let mutable pos = 0.0
@@ -1408,12 +1462,10 @@ void main() {
                             dotRects.Add(rv)
                             pos <- pos + dotSpacing * 2.0
                         writeBorderRing ()
-                        Gl.glColorMask(true, true, true, true)
-                        Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-                        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+                        coverShapeStencil st
                         setColor st side.Color
                         for rv in dotRects do drawTriangles st rv
-                        Gl.glDisable(Gl.GL_STENCIL_TEST)
+                        finishShapeStencil st
                     | BorderDouble ->
                         // Outer third and inner third of the border ring
                         let third = sw / 3.0
@@ -1442,19 +1494,15 @@ void main() {
                                 else // right
                                     rectVerts depthEnd edgeStart third edgeLen
                         writeBorderRing ()
-                        Gl.glColorMask(true, true, true, true)
-                        Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-                        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+                        coverShapeStencil st
                         setColor st side.Color
                         drawTriangles st outerThirdRect
                         // Need to re-write stencil for second band
                         writeBorderRing ()
-                        Gl.glColorMask(true, true, true, true)
-                        Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-                        Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+                        coverShapeStencil st
                         setColor st side.Color
                         drawTriangles st innerThirdRect
-                        Gl.glDisable(Gl.GL_STENCIL_TEST)
+                        finishShapeStencil st
                     | NoBorder -> ()
                 // Top side
                 let topTri = [| float32 cx; float32 cy; float32 x0; float32 y0; float32 x1; float32 y0 |]
@@ -1472,10 +1520,32 @@ void main() {
         | BackdropFilter (clipPath, fillRule, filters, children) ->
             // 1) Capture current framebuffer as a texture
             let dstTex = captureCurrentFbToTexture st.W st.H
+            let clipActive = not st.ActiveClips.IsEmpty
+            // Intermediate full-frame passes use independent targets, whose
+            // stencil buffers do not contain the parent's clip.
+            Gl.glDisable(Gl.GL_STENCIL_TEST)
             // 2) Apply filter chain to the captured texture
             let mutable currentTex = dstTex
+            let mutable currentFbo = st.ActiveFbo
             let mutable tempTargets = []
+            let mutable customPixels: uint32[] = null
+            let mutable customBytes: byte[] = null
+            let mutable customPending = false
+            let flushCustom () =
+                try flushCustomPixels currentTex st.W st.H customPending customPixels customBytes
+                with _ ->
+                    for t in tempTargets do releaseFbo st.FboPool t
+                    deleteTexture dstTex
+                    restoreMainState st
+                    restoreParentStencil clipActive
+                    reraise()
+                customPixels <- null
+                customBytes <- null
+                customPending <- false
             for filter in filters do
+                match filter with
+                | Custom _ | DropShadow _ -> ()
+                | _ -> flushCustom ()
                 match filter with
                 | Blur radius ->
                     let hShader = GlslCompiler.buildHBlurShader radius st.W
@@ -1488,6 +1558,7 @@ void main() {
                         drawFullscreenQuad hShader currentTex 0
                         Gl.glEnable(Gl.GL_BLEND)
                         currentTex <- hT.Texture
+                        currentFbo <- hT.Fbo
                         tempTargets <- hT :: tempTargets
                         let vT = acquireFbo st.FboPool
                         Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, vT.Fbo)
@@ -1496,6 +1567,7 @@ void main() {
                         drawFullscreenQuad vShader currentTex 0
                         Gl.glEnable(Gl.GL_BLEND)
                         currentTex <- vT.Texture
+                        currentFbo <- vT.Fbo
                         tempTargets <- vT :: tempTargets
                 | _ ->
                     let shader =
@@ -1508,7 +1580,19 @@ void main() {
                         | Invert f -> Some (GlslCompiler.buildInvertShader f)
                         | HueRotate d -> Some (GlslCompiler.buildHueRotateShader d)
                         | OpacityFilter f -> Some (GlslCompiler.buildOpacityShader f)
-                        | Custom _ -> invalidOp "Custom pixel filters require the software renderer"
+                        | Custom pass ->
+                            try
+                                let pixels, bytes = runCustomPass st.W st.H currentFbo customPending customPixels customBytes pass
+                                customPixels <- pixels
+                                customBytes <- bytes
+                                customPending <- true
+                            with _ ->
+                                for t in tempTargets do releaseFbo st.FboPool t
+                                deleteTexture dstTex
+                                restoreMainState st
+                                restoreParentStencil clipActive
+                                reraise()
+                            None
                         | _ -> None
                     match shader with
                     | Some s ->
@@ -1519,8 +1603,10 @@ void main() {
                         drawFullscreenQuad s currentTex 0
                         Gl.glEnable(Gl.GL_BLEND)
                         currentTex <- next.Texture
+                        currentFbo <- next.Fbo
                         tempTargets <- next :: tempTargets
                     | None -> ()
+            flushCustom ()
             // 3) Composite filtered backdrop within clip region using stencil
             Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
             Gl.glViewport(0, 0, st.W, st.H)
@@ -1534,18 +1620,7 @@ void main() {
                         (tx, ty)))
             Gl.glUseProgram(st.Program)
             setMVP st (ortho (float32 st.W) (float32 st.H))
-            Gl.glEnable(Gl.GL_STENCIL_TEST)
-            Gl.glColorMask(false, false, false, false)
-            Gl.glStencilMask(0xFFu)
-            Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
-            match fillRule with
-            | EvenOdd ->
-                Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-                Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
-            | NonZero ->
-                Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-                Gl.glStencilOpSeparate(Gl.GL_FRONT, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INCR_WRAP)
-                Gl.glStencilOpSeparate(Gl.GL_BACK, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_DECR_WRAP)
+            beginShapeStencil st fillRule
             for contour in transformedContours do
                 if contour.Length >= 3 then
                     let verts = Array.zeroCreate<float32> (contour.Length * 2)
@@ -1553,14 +1628,12 @@ void main() {
                     for (x, y) in contour do verts.[i] <- float32 x; verts.[i+1] <- float32 y; i <- i + 2
                     drawTriangleFan st verts
             // Draw filtered texture where stencil != 0, replacing destination pixels
-            Gl.glColorMask(true, true, true, true)
-            Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-            Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_ZERO)
+            coverShapeStencil st
             Gl.glDisable(Gl.GL_BLEND)
             let passthrough = GlslCompiler.buildPassthroughShader ()
             drawFullscreenQuad passthrough currentTex 0
             Gl.glEnable(Gl.GL_BLEND)
-            Gl.glDisable(Gl.GL_STENCIL_TEST)
+            finishShapeStencil st
             // Cleanup
             for t in tempTargets do releaseFbo st.FboPool t
             deleteTexture dstTex
@@ -1617,10 +1690,28 @@ void main() {
             restoreMainState st
 
         | Filtered (filters, children) ->
-            // Render children to offscreen FBO
+            // Filter in an independent, unclipped layer; clip the final result.
+            let clipActive = Gl.glIsEnabled(Gl.GL_STENCIL_TEST) <> 0uy
             let mutable current = renderToOffscreen st orthoBase m softFb children st.W st.H
+            Gl.glDisable(Gl.GL_STENCIL_TEST)
             let mutable targets = [current]
+            let mutable customPixels: uint32[] = null
+            let mutable customBytes: byte[] = null
+            let mutable customPending = false
+            let flushCustom () =
+                try flushCustomPixels current.Texture st.W st.H customPending customPixels customBytes
+                with _ ->
+                    for t in targets do releaseFbo st.FboPool t
+                    restoreMainState st
+                    restoreParentStencil clipActive
+                    reraise()
+                customPixels <- null
+                customBytes <- null
+                customPending <- false
             for filter in filters do
+                match filter with
+                | Custom _ -> ()
+                | _ -> flushCustom ()
                 match filter with
                 | Brightness factor ->
                     let shader = GlslCompiler.buildBrightnessShader factor
@@ -1702,8 +1793,17 @@ void main() {
                     Gl.glEnable(Gl.GL_BLEND)
                     current <- next
                     targets <- next :: targets
-                | Custom _ ->
-                    invalidOp "Custom pixel filters require the software renderer"
+                | Custom pass ->
+                    try
+                        let pixels, bytes = runCustomPass st.W st.H current.Fbo customPending customPixels customBytes pass
+                        customPixels <- pixels
+                        customBytes <- bytes
+                        customPending <- true
+                    with _ ->
+                        for t in targets do releaseFbo st.FboPool t
+                        restoreMainState st
+                        restoreParentStencil clipActive
+                        reraise()
                 | Blur radius ->
                     // 6-pass separable box blur (H→V→H→V→H→V) matching software's 3× box blur
                     let hShader = GlslCompiler.buildHBlurShader radius st.W
@@ -1759,29 +1859,28 @@ void main() {
                             Gl.glEnable(Gl.GL_BLEND)
                             shadowCur <- vT
                             targets <- vT :: targets
-                    // Step 3: Draw blurred shadow to parent FBO, then original on top
-                    Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
+                    // Composite into another offscreen target so later filters still
+                    // see the shadow and the parent is changed only once at the end.
+                    let composited = acquireFbo st.FboPool
+                    Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, composited.Fbo)
                     Gl.glViewport(0, 0, st.W, st.H)
+                    Gl.glClearColor(0.0f, 0.0f, 0.0f, 0.0f)
+                    Gl.glClear(Gl.GL_COLOR_BUFFER_BIT)
                     let passthrough = GlslCompiler.buildPassthroughShader ()
-                    // Draw shadow (with blending)
                     drawFullscreenQuad passthrough shadowCur.Texture 0
-                    // Draw original on top (with blending)
                     drawFullscreenQuad passthrough current.Texture 0
-                    // Cleanup and restore, skip final composite below
-                    for t in targets do releaseFbo st.FboPool t
-                    restoreMainState st
-                    // Return early—we already composited to main FBO
-                    current <- { Fbo = -1; Texture = 0; StencilRb = 0; Width = 0; Height = 0 }
-                    targets <- []
+                    current <- composited
+                    targets <- composited :: targets
 
+            flushCustom ()
+            restoreParentStencil clipActive
             // Final composite: draw result texture to parent FBO with blending
-            if current.Fbo <> -1 then
-                Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
-                Gl.glViewport(0, 0, st.W, st.H)
-                let passthrough = GlslCompiler.buildPassthroughShader ()
-                drawFullscreenQuad passthrough current.Texture 0
-                for t in targets do releaseFbo st.FboPool t
-                restoreMainState st
+            Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
+            Gl.glViewport(0, 0, st.W, st.H)
+            let passthrough = GlslCompiler.buildPassthroughShader ()
+            drawFullscreenQuad passthrough current.Texture 0
+            for t in targets do releaseFbo st.FboPool t
+            restoreMainState st
 
         | Blend (mode, children) ->
             // Capture current framebuffer as dst texture
@@ -1810,40 +1909,14 @@ void main() {
                         let ty = m.M12 * x + m.M22 * y + m.DY
                         (tx, ty)))
 
-            // Phase 1: Write stencil from clip path
-            Gl.glEnable(Gl.GL_STENCIL_TEST)
-            Gl.glColorMask(false, false, false, false)
-            Gl.glStencilMask(0xFFu)
-            Gl.glClear(Gl.GL_STENCIL_BUFFER_BIT)
-
-            let identityMvp = orthoBase
-            setMVP st identityMvp
-
-            match fillRule with
-            | EvenOdd ->
-                Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-                Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INVERT)
-            | NonZero ->
-                Gl.glStencilFunc(Gl.GL_ALWAYS, 0, 0xFF)
-                Gl.glStencilOpSeparate(Gl.GL_FRONT, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_INCR_WRAP)
-                Gl.glStencilOpSeparate(Gl.GL_BACK, Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_DECR_WRAP)
-
-            for contour in transformedContours do
-                if contour.Length >= 3 then
-                    let verts = Array.zeroCreate<float32> (contour.Length * 2)
-                    let mutable i = 0
-                    for (x, y) in contour do
-                        verts.[i] <- float32 x; verts.[i+1] <- float32 y
-                        i <- i + 2
-                    drawTriangleFan st verts
-
-            // Phase 2: Render children with stencil test active
-            Gl.glColorMask(true, true, true, true)
-            Gl.glStencilFunc(Gl.GL_NOTEQUAL, 0, 0xFF)
-            Gl.glStencilOp(Gl.GL_KEEP, Gl.GL_KEEP, Gl.GL_KEEP)
-            children |> List.iter (dispatch st orthoBase m softFb)
-
-            Gl.glDisable(Gl.GL_STENCIL_TEST)
+            let previous = st.ActiveClips
+            writeClipStencil st transformedContours fillRule previous.IsEmpty
+            st.ActiveClips <- (transformedContours, fillRule) :: previous
+            try children |> List.iter (dispatch st orthoBase m softFb)
+            finally
+                st.ActiveClips <- previous
+                Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
+                replayClipStencil st
 
         | Mask (maskCmds, contentCmds) ->
             let maskTarget = renderToOffscreen st orthoBase m softFb maskCmds st.W st.H
@@ -2131,13 +2204,14 @@ void main() {
             { W = 1; H = 1; Egl = { Egl.Display = nativeint 0; Surface = nativeint 0; Context = nativeint 0 }
               Program = 0; LocPos = 0; LocMVP = 0; LocColor = 0; Vbo = 0
               Fbo = 0; ColorRb = 0; StencilRb = 0
-              FboPool = createPool 1 1; ActiveFbo = 0; TextAtlasTex = 0
+              FboPool = createPool 1 1; ActiveFbo = 0; ActiveClips = []; TextAtlasTex = 0
               TexCache = System.Collections.Generic.Dictionary<uint32[], int>() }
         let mutable softFb = Framebuffer.create 1 1 Color.black
         let mutable orthoBase = ortho 1.0f 1.0f
 
         { Init = fun w h ->
             st.W <- w; st.H <- h
+            st.ActiveClips <- []
             // Tear down previous context if any
             if st.Egl.Display <> nativeint 0 then Egl.teardown st.Egl
             st.Egl <- Egl.init w h
@@ -2240,7 +2314,7 @@ void main() {
             { W = w; H = h; Egl = { Egl.Display = nativeint 0; Surface = nativeint 0; Context = nativeint 0 }
               Program = 0; LocPos = 0; LocMVP = 0; LocColor = 0; Vbo = 0
               Fbo = 0; ColorRb = 0; StencilRb = 0
-              FboPool = createPool w h; ActiveFbo = 0; TextAtlasTex = 0
+              FboPool = createPool w h; ActiveFbo = 0; ActiveClips = []; TextAtlasTex = 0
               TexCache = System.Collections.Generic.Dictionary<uint32[], int>() }
         let mutable softFb = Framebuffer.create w h { R = 0uy; G = 0uy; B = 0uy; A = 0uy }
         let mutable orthoBase = ortho (float32 w) (float32 h)
@@ -2430,6 +2504,9 @@ void main() {
                 flushTexCache st
                 // Bind main FBO and clear
                 Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, mainFbo)
+                st.ActiveClips <- []
+                Gl.glDisable(Gl.GL_STENCIL_TEST)
+                Gl.glStencilMask(0xFFu)
                 st.ActiveFbo <- mainFbo
                 Gl.glViewport(0, 0, st.W, st.H)
                 Gl.glClearColor(0.0f, 0.0f, 0.0f, 0.0f)

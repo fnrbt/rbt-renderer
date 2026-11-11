@@ -259,8 +259,8 @@ module Types =
         | HueRotate of float
         | OpacityFilter of float
         /// A host-supplied pixel pass (no name lookup). Carried through `Filtered` /
-        /// `BackdropFilter` like any other filter. CPU/software backend; the GL backend may
-        /// fall back to software for this case.
+        /// `BackdropFilter` like any other filter. GL reads pixels to the CPU and
+        /// uploads the result; built-in GL filters remain GPU-native.
         | Custom of PixelPass
 
     type BorderStyle = NoBorder | BorderSolid | BorderDashed | BorderDotted | BorderDouble

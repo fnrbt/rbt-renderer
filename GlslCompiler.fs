@@ -343,20 +343,29 @@ void main() {
         let lastStop = stops |> List.last
         sb.AppendLine(sprintf "    vec4 color = %s;" (colorVec lastStop.StopColor)) |> ignore
 
-        // Generate if-else chain for stop intervals
-        let pairs = stops |> List.pairwise
-        for i, (s0, s1) in pairs |> List.indexed do
-            let keyword = if i = 0 then "if" else "} else if"
-            sb.AppendLine(sprintf "    %s (t <= %.6f) {" keyword (float32 s1.Offset)) |> ignore
-            let range = s1.Offset - s0.Offset
-            if range > 1e-8 then
-                sb.AppendLine(sprintf "        float f = clamp((t - %.6f) / %.6f, 0.0, 1.0);" (float32 s0.Offset) (float32 range)) |> ignore
-                sb.AppendLine(sprintf "        color = mix(%s, %s, f);" (colorVec s0.StopColor) (colorVec s1.StopColor)) |> ignore
+        // A linear else-if chain becomes unreliable on GLES drivers with
+        // hundreds of sampled stops (and costs O(n) fragment branches). Route
+        // to the same first matching interval with a balanced decision tree.
+        let pairs = stops |> List.pairwise |> List.toArray
+        let rec emitIntervals lo hi depth =
+            let pad = String.replicate depth "    "
+            if lo = hi then
+                let s0, s1 = pairs.[lo]
+                let range = s1.Offset - s0.Offset
+                if range > 1e-8 then
+                    sb.AppendLine(sprintf "%sfloat f = clamp((t - %.6f) / %.6f, 0.0, 1.0);" pad (float32 s0.Offset) (float32 range)) |> ignore
+                    sb.AppendLine(sprintf "%scolor = mix(%s, %s, f);" pad (colorVec s0.StopColor) (colorVec s1.StopColor)) |> ignore
+                else
+                    sb.AppendLine(sprintf "%scolor = %s;" pad (colorVec s1.StopColor)) |> ignore
             else
-                sb.AppendLine(sprintf "        color = %s;" (colorVec s1.StopColor)) |> ignore
-
-        if not pairs.IsEmpty then
-            sb.AppendLine("    }") |> ignore
+                let mid = lo + (hi - lo) / 2
+                let _, bound = pairs.[mid]
+                sb.AppendLine(sprintf "%sif (t <= %.6f) {" pad (float32 bound.Offset)) |> ignore
+                emitIntervals lo mid (depth + 1)
+                sb.AppendLine(sprintf "%s} else {" pad) |> ignore
+                emitIntervals (mid + 1) hi (depth + 1)
+                sb.AppendLine(sprintf "%s}" pad) |> ignore
+        if pairs.Length > 0 then emitIntervals 0 (pairs.Length - 1) 1
 
         sb.AppendLine("    gl_FragColor = color;") |> ignore
         sb.ToString()

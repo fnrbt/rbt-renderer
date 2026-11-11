@@ -84,10 +84,31 @@ the former division-by-256 approximation could reduce opaque alpha to 254.
 
 Transparency groups on GL use CPU readback/compositing and upload, including
 `ColorManagedGroup`; they are not a zero-readback direct-presentation path.
-GL still explicitly rejects custom pixel filters, including consumer-defined
-luminosity/transfer masks; use Raster or Canvas for those commands.
-Knockout shape extraction is approximate for expanding
-filters, text represented as masks and intrinsic image alpha.
+`Filtered` and `BackdropFilter` run built-in color/blur passes on GL; `Custom`
+pixel passes instead read the full premultiplied BGRA image into CPU memory,
+invoke the host callback with the same top-left `w × h` array contract as
+Raster, and upload its output before the next GPU pass or composite. Adjacent
+custom passes share a single readback/upload. A custom pass on empty content
+still receives the entire transparent frame, so it can seed a mask backdrop;
+backdrop passes receive the existing destination frame. Filtered content uses
+an independent offscreen layer, with the enclosing clip applied on composite.
+This CPU round trip applies to consumer-defined luminosity and transfer masks
+too; arbitrary callbacks are not approximated by shaders.
+
+GL reserves the stencil's top bit for the intersection of enclosing clips;
+path fills use the remaining winding bits without clearing that clip. Popping
+a nested clip replays its enclosing clip paths on the same framebuffer, while
+offscreen group surfaces start with an independent stencil and the parent clip
+applies at their composite boundary. This keeps gradient and image fills inside
+arbitrary transformed or nested clips without isolating the clipped backdrop.
+
+GPU-native gradient shaders route directly among all supplied stop intervals
+with balanced branches instead of a long linear `else if` chain. This keeps
+the original piecewise interpolation and discontinuities for dense sampled
+shadings without replacing their stops with an approximate texture ramp.
+
+Knockout shape extraction is approximate for expanding filters, text
+represented as masks and intrinsic image alpha.
 
 Verification covers native raster pixels, Chromium Canvas and 11 live EGL cases
 on Mesa llvmpipe (OpenGL ES 3.2): isolation/knockout combinations, opacity,
@@ -97,6 +118,15 @@ independent expectations and raster probes within two channel values. This is
 software Mesa execution, not hardware-GPU verification. No supported paint
 currently reaches the deferred software-paint fallback, so that path was not
 claimed as exercised.
+
+The callback and stencil changes were also exercised by ten live EGL scenarios:
+replacement/in-place callbacks, GPU-pass ordering, empty-content seeding,
+premultiplication and orientation, transformed clips, masks, nested groups,
+backdrop filters, shadow ordering and callback exceptions. Fourteen PDF fixtures
+were rendered with Raster, GL and Chromium Canvas; independent pixel probes
+cover ICC LUT source colors, luminosity/transfer masks, nested clips and
+isolation/knockout combinations. The 129-stop CMYK gradients match Raster within
+one channel value across 640 interior samples on Mesa llvmpipe.
 
 ## Why the current shape wastes work
 
