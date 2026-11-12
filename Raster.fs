@@ -2631,6 +2631,9 @@ module Raster =
                 let outline = expandStroke contour closed style'
                 let outlineContours = flattenPath outline
                 scanlineFillPaint fb outlineContours style'.Paint EvenOdd
+        | DrawImageReduced (src, srcRect, dstRect, smooth) ->
+            let filtered, filteredRect = ImageReduction.prepare src srcRect dstRect m
+            dispatchWithTransform fb m (DrawImage (filtered, filteredRect, dstRect, smooth))
         | DrawImage (src, srcRect, dstRect, smooth) ->
             let determinant = m.M11 * m.M22 - m.M12 * m.M21
             let dx, dy = float dstRect.Pos.X, float dstRect.Pos.Y
@@ -3414,6 +3417,7 @@ module Raster =
                 | FillRoundedRect4 _ -> "FillRoundedRect4"
                 | StrokeRoundedRect4 _ -> "StrokeRoundedRect4"
                 | DrawImage _ -> "DrawImage"
+                | DrawImageReduced _ -> "DrawImageReduced"
                 | BoxShadow _ -> "BoxShadow"
                 | PathBool _ -> "PathBool"
                 | Blit _ -> "Blit"

@@ -17,6 +17,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Types.fs" />
+    <Compile Include="ImageReduction.fs" />
     <Compile Include="Pcf.fs" />
     <Compile Include="Text.fs" />
     <Compile Include="Cmd.fs" />

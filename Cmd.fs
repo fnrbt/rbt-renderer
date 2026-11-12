@@ -26,6 +26,8 @@ type Cmd =
     | FillRoundedRect4 of Rect * tl: float<px> * tr: float<px> * br: float<px> * bl: float<px> * Color
     | StrokeRoundedRect4 of Rect * tl: float<px> * tr: float<px> * br: float<px> * bl: float<px> * StrokeStyle
     | DrawImage of source: Framebuffer * srcRect: Rect * dstRect: Rect * smooth: bool
+    /// Box-filter reductions in device space; smooth controls magnification only.
+    | DrawImageReduced of source: Framebuffer * srcRect: Rect * dstRect: Rect * smooth: bool
     | BoxShadow of rect: Rect * offsetX: float * offsetY: float * blur: int * spread: float<px> * color: Color * inset: bool * cornerRadius: float<px> option
     | PathBool of op: BoolOp * PathSeg list * PathSeg list * Paint * FillRule
     | Blit of source: Framebuffer * dstPos: Vec2 * opacity: float
@@ -104,7 +106,7 @@ module Cmd =
         | StrokeRoundedRect (r, radius, style) -> StrokeRoundedRect (r, radius, shapeStyle style)
         | FillRoundedRect4 (r, tl, tr, br, bl, _) -> FillRoundedRect4 (r, tl, tr, br, bl, Color.white)
         | StrokeRoundedRect4 (r, tl, tr, br, bl, style) -> StrokeRoundedRect4 (r, tl, tr, br, bl, shapeStyle style)
-        | DrawImage _ -> cmd
+        | DrawImage _ | DrawImageReduced _ -> cmd
         | BoxShadow (r, dx, dy, blur, spread, color, inset, radius) ->
             BoxShadow (r, dx, dy, blur, spread, opaque color, inset, radius)
         | PathBool (op, a, b, paint, rule) -> PathBool (op, a, b, shapePaint paint, rule)

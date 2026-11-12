@@ -1116,6 +1116,22 @@ void main() {
             if not (stencilFillContoursWithPaint st outlineContours EvenOdd style.Paint mvp) then
                 softwareFallback st cmd m softFb
 
+        | DrawImageReduced (src, srcRect, dstRect, smooth) ->
+            let filtered, filteredRect = ImageReduction.prepare src srcRect dstRect m
+            dispatch st orthoBase m softFb (DrawImage (filtered, filteredRect, dstRect, smooth))
+            // A filtered framebuffer is transient. Do not retain a new texture on
+            // every frame in the persistent backend's source-image cache.
+            if not (obj.ReferenceEquals(filtered, src)) then
+                match Framebuffer.tryGetArray filtered with
+                | Some pixels ->
+                    match st.TexCache.TryGetValue pixels with
+                    | true, tex ->
+                        st.TexCache.Remove pixels |> ignore
+                        let mutable texture = tex
+                        Gl.glDeleteTextures(1, &texture)
+                    | _ -> ()
+                | None -> ()
+
         | DrawImage (src, srcRect, dstRect, smooth) ->
             let tex = getOrUploadTexture st src
             Gl.glBindTexture(Gl.GL_TEXTURE_2D, tex)

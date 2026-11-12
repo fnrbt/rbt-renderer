@@ -329,6 +329,13 @@ let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
                         | None -> ()
         | _ -> ()
 
+    | DrawImageReduced (fb, srcR, dstR, smooth) ->
+        let a, b, c, d : float * float * float * float =
+            emitJsExpr ctx "(function(m){return [m.a,m.b,m.c,m.d]})(($0).getTransform())"
+        let m = { M11 = a; M12 = b; M21 = c; M22 = d; DX = 0.0; DY = 0.0 }
+        let filtered, filteredRect = ImageReduction.prepare fb srcR dstR m
+        execute ctx (DrawImage (filtered, filteredRect, dstR, smooth))
+
     | DrawImage (fb, srcR, dstR, smooth) ->
         let bmp = CanvasImage.canvasFor fb
         ctx.save()

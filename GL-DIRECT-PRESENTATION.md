@@ -110,6 +110,28 @@ equivalence at device sizes 7 and 7.5. With Mesa EGL/GLES libraries installed:
 EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 dotnet run --project textbench -c Release -- NotoSans-Regular.ttf /tmp/renderer-gl-check --gl-transforms
 ```
 
+`DrawImageReduced` opts into device-dependent box reduction on Raster, Canvas
+and GL. The shared prefilter averages premultiplied channels, respects source
+subrectangles, and uses the transformed axes' perpendicular projected lengths
+for rotation/shear. It never upsamples; the command's smoothing flag controls
+magnification. Existing `DrawImage` remains unchanged, including explicit
+nearest-neighbor reductions. Explicit `WithShape` geometry stays independent of
+image color alpha.
+
+Mutable source images are filtered per draw rather than cached across mutations.
+GL releases the transient reduced texture after drawing; this path performs CPU
+filtering and an upload, not GPU mipmapping. Use matching Core/Canvas/native
+package versions when consuming the new command.
+
+Focused reduction checks cover checkerboard coverage, premultiplied alpha,
+unchanged nearest sampling, mirrored/rotated source subrectangles and explicit
+shape. They passed on CPU, live Mesa GL and browser Canvas:
+
+```sh
+dotnet run --project imagebench/ImageBench.fsproj -c Release
+EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 dotnet run --project imagebench/ImageBench.fsproj -c Release -- --gl
+```
+
 Transparency groups on GL use CPU readback/compositing and upload, including
 `ColorManagedGroup`; they are not a zero-readback direct-presentation path.
 `Filtered` and `BackdropFilter` run built-in color/blur passes on GL; `Custom`
