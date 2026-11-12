@@ -111,9 +111,11 @@ EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 dotnet run --project textbench 
 ```
 
 `DrawImageReduced` opts into device-dependent box reduction on Raster, Canvas
-and GL. The shared prefilter averages premultiplied channels, respects source
-subrectangles, and uses the transformed axes' perpendicular projected lengths
-for rotation/shear. It never upsamples; the command's smoothing flag controls
+and GL. Renderer policy uses the transformed axes' perpendicular projected lengths
+for rotation/shear and chooses a reduced size without upsampling. The filtering
+kernel is `Rbt.Image.Codecs.Resample.downscaleRegion`: fractional source rectangles,
+edge clamping and premultiplied channels. Native source memory is passed without
+copying, including sliced framebuffers. The command's smoothing flag controls
 magnification. Existing `DrawImage` remains unchanged, including explicit
 nearest-neighbor reductions. Explicit `WithShape` geometry stays independent of
 image color alpha.

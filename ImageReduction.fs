@@ -20,30 +20,11 @@ module ImageReduction =
             // Never upsample here: magnification is the backend's sampling policy.
             let w = max 1 (int (ceil (min sw xLength)))
             let h = max 1 (int (ceil (min sh yLength)))
-            let result = Array.zeroCreate<uint32> (w * h)
+            let ctx = Rbt.Image.Codecs.DecodeContext()
 #if FABLE_COMPILER
             let pixels = source.Px
 #else
-            let pixels = source.Px.Span
+            let pixels: System.ReadOnlyMemory<uint32> = source.Px
 #endif
-            let inline clamp lo hi v = max lo (min hi v)
-            for y = 0 to h - 1 do
-                let y0 = sy + float y * sh / float h
-                let y1 = sy + float (y + 1) * sh / float h
-                for x = 0 to w - 1 do
-                    let x0 = sx + float x * sw / float w
-                    let x1 = sx + float (x + 1) * sw / float w
-                    let mutable b, g, r, a = 0.0, 0.0, 0.0, 0.0
-                    for iy = int (floor y0) to int (ceil y1) - 1 do
-                        let wy = min y1 (float (iy + 1)) - max y0 (float iy)
-                        for ix = int (floor x0) to int (ceil x1) - 1 do
-                            let weight = wy * (min x1 (float (ix + 1)) - max x0 (float ix))
-                            let p = pixels.[clamp 0 (source.H - 1) iy * source.W + clamp 0 (source.W - 1) ix]
-                            b <- b + float (Pixel.b p) * weight
-                            g <- g + float (Pixel.g p) * weight
-                            r <- r + float (Pixel.r p) * weight
-                            a <- a + float (Pixel.a p) * weight
-                    let area = (x1 - x0) * (y1 - y0)
-                    let inline channel v = byte (clamp 0.0 255.0 (floor (v / area + 0.5)))
-                    result.[y * w + x] <- Pixel.pack (channel b) (channel g) (channel r) (channel a)
+            let result = Rbt.Image.Codecs.Resample.downscaleRegion ctx pixels source.W source.H sx sy sw sh w h
             Framebuffer.ofArray result w h, rect 0.0 0.0 (float w) (float h)
