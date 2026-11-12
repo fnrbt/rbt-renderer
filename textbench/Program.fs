@@ -164,6 +164,30 @@ let checkGlTransforms font =
         if not equal then failwithf "Scaled small GL glyph loses device-space coverage at %g" deviceSize
         printfn "PASS small GL glyph scale equivalence at %g" deviceSize
 
+// A fractional font size must rasterize the actual outline rather than the
+// nearest integer-ppem cache entry, with and without an explicit AA wrapper.
+let checkFractionalCpuGlyphs font =
+    for size in [12.25; 12.75; 0.75] do
+        let run = Text.layout font size "H" |> List.head
+        let glyph = run.Glyphs.[0]
+        let origin = vec2 20.0 30.0
+        let scale = size / Text.unitsPerEm font
+        let outline =
+            Text.glyphOutline font glyph.GlyphId
+            |> List.map (Text.translatePathSeg (float origin.X + glyph.X) (float origin.Y + glyph.Y) scale)
+        if outline.IsEmpty then failwith "Test glyph has no outline"
+        for explicitAa in [false; true] do
+            let glyphCmd = DrawGlyphs (origin, [run], Solid Color.black)
+            let outlineCmd = FillPath (outline, Solid Color.black, NonZero)
+            let wrap cmd = if explicitAa then AntiAlias (4, [cmd]) else cmd
+            let actual = Scene.render (Raster.create ()) 64 64 [Clear Color.white; wrap glyphCmd]
+            // The ordinary glyph path uses four samples, as does this oracle.
+            let expected = Scene.render (Raster.create ()) 64 64 [Clear Color.white; AntiAlias (4, [outlineCmd])]
+            for i = 0 to actual.Px.Length - 1 do
+                if actual.Px.Span.[i] <> expected.Px.Span.[i] then
+                    failwithf "Fractional CPU glyph differs from its outline at size %g (explicit AA %b)" size explicitAa
+        printfn "PASS fractional CPU glyph size %g" size
+
 // ── Main entry point ──
 
 [<EntryPoint>]
@@ -194,6 +218,9 @@ let main argv =
     printfn ""
 
     let mutable font = Text.loadFontFile fontPath
+    if Array.contains "--fractional-cpu-glyphs" argv then
+        checkFractionalCpuGlyphs font
+        exit 0
     if Array.contains "--gl-transforms" argv then
         checkGlTransforms font
         exit 0

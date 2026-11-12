@@ -110,6 +110,19 @@ equivalence at device sizes 7 and 7.5. With Mesa EGL/GLES libraries installed:
 EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 dotnet run --project textbench -c Release -- NotoSans-Regular.ttf /tmp/renderer-gl-check --gl-transforms
 ```
 
+CPU outline glyphs use the integer-ppem bitmap cache only at exactly integral
+font sizes. Fractional sizes retain their actual outline scale and four-sample
+text antialiasing instead of rounding ink size independently of layout. Bitmap
+faces keep their existing strike selection. The fractional outline fallback
+does not use the bitmap cache; Canvas and GL behavior is unchanged.
+
+The focused CPU regression compares glyph output with the directly rasterized
+outline at 12.25, 12.75 and 0.75 pixels, with and without an explicit AA wrapper:
+
+```sh
+dotnet run --project textbench -c Release -- NotoSans-Regular.ttf /tmp/renderer-cpu-check --fractional-cpu-glyphs
+```
+
 `DrawImageReduced` opts into device-dependent box reduction on Raster, Canvas
 and GL. Renderer policy uses the transformed axes' perpendicular projected lengths
 for rotation/shear and chooses a reduced size without upsampling. The filtering

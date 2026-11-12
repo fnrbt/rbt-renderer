@@ -3036,7 +3036,13 @@ module Raster =
             for run in runs do
                 let s = run.FontSize / Text.unitsPerEm run.Font
                 let ppem = int (round run.FontSize)
-                let useBitmapCache = isPureTranslation m && ppem >= 1 && ppem <= 128
+                // Outline bitmap cache keys have integral ppem; do not round a
+                // fractional outline size or its ink no longer matches layout.
+                let exactBitmapSize =
+                    match run.Font.Face with
+                    | Text.BitmapFace _ -> true
+                    | Text.OutlineFace _ -> run.FontSize = float ppem
+                let useBitmapCache = isPureTranslation m && exactBitmapSize && ppem >= 1 && ppem <= 128
                 for g in run.Glyphs do
                     if useBitmapCache then
                         let wx = ox + g.X + m.DX
@@ -3061,7 +3067,11 @@ module Raster =
                                 let segs' = outline |> List.map (Text.translatePathSeg (ox + g.X) (oy + g.Y) s >> transformPathSeg m)
                                 let contours = flattenPath segs'
                                 match paint' with
+                                | Solid c when isPureTranslation m && not exactBitmapSize ->
+                                    scanlineFillAA fb contours c 4 NonZero
                                 | Solid c -> scanlineFill fb contours c NonZero
+                                | _ when isPureTranslation m && not exactBitmapSize ->
+                                    scanlineFillPaintAA fb contours paint' 4 NonZero
                                 | _ -> scanlineFillPaint fb contours paint' NonZero
         | RetainedGlesLayer (bounds, layer) ->
             layer.SoftwareFallback bounds |> List.iter (dispatchWithTransform fb m)
@@ -3273,7 +3283,11 @@ module Raster =
                 for run in runs do
                     let s = run.FontSize / Text.unitsPerEm run.Font
                     let ppem = int (round run.FontSize)
-                    let useBitmapCache = isPureTranslation m && ppem >= 1 && ppem <= 128
+                    let exactBitmapSize =
+                        match run.Font.Face with
+                        | Text.BitmapFace _ -> true
+                        | Text.OutlineFace _ -> run.FontSize = float ppem
+                    let useBitmapCache = isPureTranslation m && exactBitmapSize && ppem >= 1 && ppem <= 128
                     for g in run.Glyphs do
                         if useBitmapCache then
                             let wx = ox + g.X + m.DX
