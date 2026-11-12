@@ -79,6 +79,29 @@ before boundary blend mode, opacity and mask. Untouched parent pixels do not
 make a color-space round trip. Ordinary `TransparencyGroup` inherits its
 parent's working space.
 
+`ColorManagedGroup4` generalizes boundary conversion to three- or
+four-component working spaces. Its callbacks exchange normalized straight
+components; the fourth input and output are ignored for three-component
+spaces. `Complement` selects subtractive blend calculations in the group.
+Each `Components4 (first, fourth)` is one paint object: the first command
+stores components 1–3 in RGB, and the second stores component 4 as grayscale.
+Both commands must have the same geometry, interpolation and alpha. They share
+one shape and compositing boundary; the fourth component is not an independent
+transparency object. Color-profile interpretation and conversions remain the
+caller's responsibility.
+For subtractive nonseparable modes, HSL uses complemented components 1–3;
+Hue, Saturation and Color retain the backdrop's fourth component, while
+Luminosity takes the source's fourth component.
+`Raster.rasterizeComponents` renders an offscreen four-component command list
+into two premultiplied framebuffers with matching alpha, preserving the fourth
+component in the grayscale second framebuffer.
+
+The shared compositor uses five float32 values per pixel for each temporary
+component surface, in addition to BGRA surfaces used for geometry callbacks.
+Nested groups can therefore allocate several full-canvas surfaces per level.
+GL reads the backdrop back, renders individual geometry to GL offscreen
+surfaces, and uploads the composited result.
+
 `WithShape (shape, commands)` marks one indivisible object while executing its
 color commands directly in the current context. Its lazy shape program is
 evaluated only when a containing knockout group needs coverage; its alpha is

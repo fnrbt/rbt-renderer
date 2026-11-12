@@ -19,6 +19,13 @@ type Cmd =
     /// Children are already encoded in the group's working space. Convert only
     /// the group's source contribution at its parent-space compositing boundary.
     | ColorManagedGroup of conversion: ColorSpaceConversion * isolated: bool * knockout: bool * opacity: float * mode: BlendMode * mask: Cmd list option * cmds: Cmd list
+    /// A component-aware group; group paints supply their fourth component
+    /// with Components4. Conversion callbacks operate on straight components.
+    | ColorManagedGroup4 of conversion: ColorSpaceConversion4 * isolated: bool * knockout: bool * opacity: float * mode: BlendMode * mask: Cmd list option * cmds: Cmd list
+    /// Two representations of the same paint object. The first carries the
+    /// first three components in RGB, the second carries component four as
+    /// grayscale; geometry, interpolation and alpha must be identical.
+    | Components4 of first: Cmd * fourth: Cmd
     | Clip of clipPath: PathSeg list * fillRule: FillRule * cmds: Cmd list
     | Filtered of filters: Filter list * cmds: Cmd list
     | FillRoundedRect of Rect * cornerRadius: float<px> * Color
@@ -87,6 +94,7 @@ module Cmd =
         let shapeChildren children = List.map shapeOf children
         match cmd with
         | WithShape (shape, _) -> Group (Matrix3x2.identity, 1.0, shape.Value)
+        | Components4 (first, _) -> shapeOf first
         | Clear _ -> Clear Color.white
         | Line (a, b, _, w) -> Line (a, b, Color.white, w)
         | FillRect (r, _) -> FillRect (r, Color.white)
@@ -99,6 +107,8 @@ module Cmd =
         | TransparencyGroup (_, _, _, _, _, children) ->
             Group (Matrix3x2.identity, 1.0, shapeChildren children)
         | ColorManagedGroup (_, _, _, _, _, _, children) ->
+            Group (Matrix3x2.identity, 1.0, shapeChildren children)
+        | ColorManagedGroup4 (_, _, _, _, _, _, children) ->
             Group (Matrix3x2.identity, 1.0, shapeChildren children)
         | Clip (path, rule, children) -> Clip (path, rule, shapeChildren children)
         | Filtered (filters, children) -> Filtered (filters, shapeChildren children)

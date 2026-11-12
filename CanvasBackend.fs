@@ -183,12 +183,73 @@ let private convertCanvas (ctx: CanvasRenderingContext2D) width height convert =
             let struct (r', g', b') = convert r g b
             emitJsExpr (data, i, r', g', b') "$0[$1]=$2*255; $0[$1+1]=$3*255; $0[$1+2]=$4*255"
     emitJsExpr (ctx, image) "$0.putImageData($1,0,0)"
+// Canvas ImageData is straight RGBA; the shared component compositor expects
+// premultiplied BGRA. Read the current parent directly rather than copying its
+// entire canvas into another offscreen surface first.
+let private pixelsFromContext (ctx: CanvasRenderingContext2D) width height =
+    let image = ctx.getImageData(0.0, 0.0, float width, float height)
+    let rgba: uint32[] = emitJsExpr image.data "new Uint32Array($0.buffer)"
+    let pixels = Array.zeroCreate<uint32> (width * height)
+    for i = 0 to pixels.Length - 1 do
+        let value = rgba.[i]
+        let alpha = value >>> 24
+        let r = (((value &&& 255u) * alpha + 127u) / 255u) <<< 16
+        let g = (((value >>> 8 &&& 255u) * alpha + 127u) / 255u) <<< 8
+        let b = ((value >>> 16 &&& 255u) * alpha + 127u) / 255u
+        pixels.[i] <- b ||| g ||| r ||| (alpha <<< 24)
+    pixels
+
+let private drawCompositedPixels (ctx: CanvasRenderingContext2D) width height pixels =
+    // putImageData ignores the inherited clip. Draw an image using the
+    // destination's clip, replacing rather than recompositing its backdrop.
+    let canvas = CanvasImage.canvasFor (Framebuffer.ofArray pixels width height)
+    ctx.save()
+    ctx.setTransform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    ctx.globalAlpha <- 1.0
+    emitJsExpr (ctx, canvas) "($0.globalCompositeOperation = 'copy', $0.drawImage($1, 0, 0))"
+    ctx.restore()
+
+
+// Component samples must not silently disappear through the RGB backend's
+// legacy warn-and-skip handling of unrelated Cmd variants or paint kinds.
+let private validComponentFillPaint = function
+    | NoPaint | Solid _ | LinearGradient (_, _, _, Pad)
+    | ImagePaint _ | TilingPaint (_, _, Repeat, Repeat) -> true
+    | _ -> false
+
+let rec private ensureComponentSample (command: Cmd) =
+    match command with
+    | Clear _ | Line _ | FillRect _ | DrawImage _ | DrawImageReduced _ -> ()
+    | FillPath (_, paint, _) when validComponentFillPaint paint -> ()
+    | StrokePath (_, style) when (match style.Paint with NoPaint | Solid _ -> true | _ -> false) -> ()
+    | DrawGlyphs (_, _, Solid _) -> ()
+    | WithShape (_, commands) | Group (_, _, commands)
+    | Clip (_, _, commands) | Blend (_, commands)
+    | SaveRestore commands | AntiAlias (_, commands) ->
+        for child in commands do ensureComponentSample child
+    | Mask (mask, commands) ->
+        for child in mask do ensureComponentSample child
+        for child in commands do ensureComponentSample child
+    | TransparencyGroup (_, _, _, _, mask, commands)
+    | ColorManagedGroup (_, _, _, _, _, mask, commands) ->
+        match mask with
+        | Some children -> for child in children do ensureComponentSample child
+        | None -> ()
+        for child in commands do ensureComponentSample child
+    | Filtered (filters, commands) when filters |> List.forall (function Custom _ -> true | _ -> false) ->
+        for child in commands do ensureComponentSample child
+    | other ->
+        let tag : string = emitJsExpr other "($0.tag !== undefined ? $0.tag : 'unknown')"
+        invalidOp (sprintf "CanvasBackend: unsupported component paint %s" tag)
 
 // ── Main interpreter ─────────────────────────────────────
 
 let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
     match cmd with
     | WithShape (_, commands) -> for c in commands do execute ctx c
+    | AntiAlias (_, commands) ->
+        // Canvas 2D already antialiases geometry; retain this wrapper's children.
+        for child in commands do execute ctx child
     | Group (m, opacity, cmds) ->
         if opacity >= 1.0 then
             ctx.save()
@@ -206,6 +267,19 @@ let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
         executeTransparencyGroup ctx None isolated knockout opacity mode mask children
     | ColorManagedGroup (conversion, isolated, knockout, opacity, mode, mask, children) ->
         executeTransparencyGroup ctx (Some conversion) isolated knockout opacity mode mask children
+    | ColorManagedGroup4 _ ->
+        let width, height = canvasSize ctx
+        let pixels = pixelsFromContext ctx width height
+        let paint commands =
+            let layer, layerContext = layerFor ctx width height
+            for command in commands do
+                ensureComponentSample command
+                execute layerContext command
+            CanvasImage.pixelsFromCanvas layer
+        ComponentCompositor.render width height pixels paint cmd
+        drawCompositedPixels ctx width height pixels
+    | Components4 _ ->
+        invalidOp "CanvasBackend: Components4 requires a ColorManagedGroup4"
 
     | Clip (segs, fr, cmds) ->
         ctx.save()
@@ -446,3 +520,16 @@ let rasterize width height commands =
     let canvas = createOffscreenCanvas width height
     render (getOffscreenContext2DReadFrequent canvas) commands
     Framebuffer.ofArray (CanvasImage.pixelsFromCanvas canvas) width height
+
+/// Rasterize a CMYK pattern or soft mask into first-three-component and K
+/// planes. The two planes share premultiplied alpha and image-space coordinates.
+let rasterizeComponents width height commands : Framebuffer * Framebuffer =
+    let paint geometry =
+        let canvas = createOffscreenCanvas width height
+        let context = getOffscreenContext2DReadFrequent canvas
+        for command in geometry do
+            ensureComponentSample command
+            execute context command
+        CanvasImage.pixelsFromCanvas canvas
+    let first, fourth = ComponentCompositor.renderComponents width height paint true commands
+    Framebuffer.ofArray first width height, Framebuffer.ofArray fourth width height

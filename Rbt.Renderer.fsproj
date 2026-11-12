@@ -7,7 +7,7 @@
   <!-- The rbt-text libraries come from the package registry. -->
   <PropertyGroup>
     <RbtTextPackageVersion Condition="'$(RbtTextPackageVersion)' == ''">0.1.7</RbtTextPackageVersion>
-    <RbtImagePackageVersion Condition="'$(RbtImagePackageVersion)' == ''">0.1.5</RbtImagePackageVersion>
+    <RbtImagePackageVersion Condition="'$(RbtImagePackageVersion)' == ''">0.1.6</RbtImagePackageVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Rbt.OpenType.Core" Version="$(RbtTextPackageVersion)" />
@@ -23,6 +23,7 @@
     <Compile Include="Pcf.fs" />
     <Compile Include="Text.fs" />
     <Compile Include="Cmd.fs" />
+    <Compile Include="ComponentCompositor.fs" />
     <Compile Include="SvgPath.fs" />
     <Compile Include="Backend.fs" />
     <Compile Include="Raster.fs" />

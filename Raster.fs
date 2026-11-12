@@ -2411,6 +2411,7 @@ module Raster =
     let rec transparencyNeedsBackdrop = function
         | TransparencyGroup (isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
         | ColorManagedGroup (_, isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
+        | ColorManagedGroup4 (_, isolated, _, _, mode, _, _) -> not isolated || mode <> Normal
         | WithShape (_, [child]) -> transparencyNeedsBackdrop child
         | WithShape (_, children) -> not children.IsEmpty
         | Group (_, opacity, [child]) when opacity >= 1.0 -> transparencyNeedsBackdrop child
@@ -2931,6 +2932,8 @@ module Raster =
             dispatchTransparencyGroup fb m 0 None isolated knockout opacity mode mask cmds
         | ColorManagedGroup (conversion, isolated, knockout, opacity, mode, mask, cmds) ->
             dispatchTransparencyGroup fb m 0 (Some conversion) isolated knockout opacity mode mask cmds
+        | ColorManagedGroup4 _ -> dispatchComponentGroup fb m 0 cmd
+        | Components4 _ -> invalidOp "Components4 requires a component-managed group"
         | Clip (clipSegs, fillRule, cmds) ->
             let clipSegs' = clipSegs |> List.map (transformPathSeg m)
             match tryRectClip clipSegs' with
@@ -3214,6 +3217,7 @@ module Raster =
                 dispatchTransparencyGroup fb m aaSamples None isolated knockout opacity mode mask cmds
             | ColorManagedGroup (conversion, isolated, knockout, opacity, mode, mask, cmds) ->
                 dispatchTransparencyGroup fb m aaSamples (Some conversion) isolated knockout opacity mode mask cmds
+            | ColorManagedGroup4 _ -> dispatchComponentGroup fb m aaSamples cmd
             | PathBool (op, segsA, segsB, paint, fillRule) ->
                 let paint' = transformPaint m paint
                 let segsA' = segsA |> List.map (transformPathSeg m)
@@ -3382,9 +3386,34 @@ module Raster =
             releaseTempFb group
             if not isolated && conversion.IsSome then releaseTempFb groupBackdrop
 
+    and dispatchComponentGroup (fb: Framebuffer) (m: Matrix3x2) (aaSamples: int) (cmd: Cmd) =
+        let pixels, copyBack =
+            match Framebuffer.tryGetArray fb with
+            | Some pixels when pixels.Length = fb.W * fb.H -> pixels, false
+            | _ -> fb.Px.ToArray(), true
+        let renderObject commands =
+            let result = Array.zeroCreate<uint32> (fb.W * fb.H)
+            let target = Framebuffer.ofArray result fb.W fb.H
+            commands |> List.iter (dispatchWithTransformAA target m aaSamples)
+            result
+        ComponentCompositor.render fb.W fb.H pixels renderObject cmd
+        if copyBack then System.Span<uint32>(pixels).CopyTo(fb.Px.Span)
+
 
     let dispatch (fb: Framebuffer) (cmd: Cmd) =
         dispatchWithTransform fb Matrix3x2.identity cmd
+
+    /// Rasterize an offscreen four-component surface. Both returned images
+    /// have the same premultiplied alpha; the fourth component is grayscale.
+    let rasterizeComponents width height transform aaSamples complement commands =
+        let renderObject children =
+            let pixels = Array.zeroCreate<uint32> (width * height)
+            let target = Framebuffer.ofArray pixels width height
+            children |> List.iter (dispatchWithTransformAA target transform aaSamples)
+            pixels
+        let first, fourth =
+            ComponentCompositor.renderComponents width height renderObject complement commands
+        Framebuffer.ofArray first width height, Framebuffer.ofArray fourth width height
 
     let create () : Backend =
         let mutable fb = Framebuffer.create 1 1 Color.black
@@ -3424,6 +3453,8 @@ module Raster =
                 | Group _ -> "Group"
                 | TransparencyGroup _ -> "TransparencyGroup"
                 | ColorManagedGroup _ -> "ColorManagedGroup"
+                | ColorManagedGroup4 _ -> "ColorManagedGroup4"
+                | Components4 _ -> "Components4"
                 | Clip _ -> "Clip"
                 | Filtered _ -> "Filtered"
                 | FillRoundedRect _ -> "FillRoundedRect"

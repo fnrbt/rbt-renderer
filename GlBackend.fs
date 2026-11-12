@@ -899,6 +899,55 @@ void main() {
                 drawFullscreenQuad opacityShader target.Texture 0
                 releaseFbo st.FboPool target
                 restoreMainState st
+        | ColorManagedGroup4 _ ->
+            Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
+            let bytes = Array.zeroCreate<byte> (st.W * st.H * 4)
+            let backdrop = Framebuffer.create st.W st.H (Color.rgba 0uy 0uy 0uy 0uy)
+            readTransparencyPixels backdrop bytes
+            let clipActive = Gl.glIsEnabled(Gl.GL_STENCIL_TEST) <> 0uy
+            if softFbHasPixels then
+                let pending = softFb.Px.Span
+                let dst = backdrop.Px.Span
+                for i = 0 to softFb.Px.Length - 1 do
+                    if Pixel.a pending.[i] > 0uy then
+                        dst.[i] <- Raster.blendPx pending.[i] dst.[i]
+                pending.Clear()
+                Gl.glDisable(Gl.GL_STENCIL_TEST)
+                Gl.glDisable(Gl.GL_BLEND)
+                let texture = uploadTransparencyPixels backdrop bytes
+                drawFullscreenQuad (GlslCompiler.buildPassthroughShader ()) texture 0
+                deleteTexture texture
+                restoreMainState st
+                softFbHasPixels <- false
+            let pixels = backdrop.Px.ToArray()
+            let scratch = Framebuffer.create st.W st.H (Color.rgba 0uy 0uy 0uy 0uy)
+            Gl.glDisable(Gl.GL_STENCIL_TEST)
+            let renderObject commands =
+                scratch.Px.Span.Clear()
+                let target = renderToOffscreen st orthoBase m scratch commands st.W st.H
+                Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, target.Fbo)
+                let output = Framebuffer.create st.W st.H (Color.rgba 0uy 0uy 0uy 0uy)
+                readTransparencyPixels output bytes
+                let dest = output.Px.Span
+                let fallback = scratch.Px.Span
+                for i = 0 to output.Px.Length - 1 do
+                    if Pixel.a fallback.[i] > 0uy then
+                        dest.[i] <- Raster.blendPx fallback.[i] dest.[i]
+                releaseFbo st.FboPool target
+                Gl.glDisable(Gl.GL_STENCIL_TEST)
+                restoreMainState st
+                output.Px.ToArray()
+            ComponentCompositor.render st.W st.H pixels renderObject cmd
+            pixels.AsSpan().CopyTo(backdrop.Px.Span)
+            Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
+            restoreParentStencil clipActive
+            let texture = uploadTransparencyPixels backdrop bytes
+            Gl.glDisable(Gl.GL_BLEND)
+            drawFullscreenQuad (GlslCompiler.buildPassthroughShader ()) texture 0
+            deleteTexture texture
+            restoreMainState st
+        | Components4 _ ->
+            invalidOp "Components4 requires a four-component transparency group"
         | TransparencyGroup _
         | ColorManagedGroup _ ->
             let conversion, isolated, knockout, opacity, mode, maskCmds, children =

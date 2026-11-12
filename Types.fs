@@ -15,11 +15,20 @@ module Types =
 
     [<Measure>] type px
 
+    /// Converts straight normalized components at a group boundary. A
+    /// three-component space ignores the fourth argument and result.
+    type ColorSpaceConversion4 =
+        { ParentComponents: int
+          GroupComponents: int
+          ToGroup: float -> float -> float -> float -> struct (float * float * float * float)
+          ToParent: float -> float -> float -> float -> struct (float * float * float * float)
+          Complement: bool }
     /// Converts normalized, unassociated RGB components between a group's
     /// working space and its parent's working space; alpha remains unchanged.
     type ColorSpaceConversion =
         { ToGroup: float -> float -> float -> struct (float * float * float)
           ToParent: float -> float -> float -> struct (float * float * float) }
+
 
     [<Struct>]
     type Color = { R: byte; G: byte; B: byte; A: byte }
