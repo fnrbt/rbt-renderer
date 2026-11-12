@@ -1961,17 +1961,21 @@ void main() {
 
         | DrawGlyphs (origin, runs, paint) ->
             let ox, oy = float origin.X, float origin.Y
+            let bitmapInDeviceSpace = m.M12 = 0.0 && m.M21 = 0.0 && m.M11 > 0.0 && m.M22 > 0.0
+            let bitmapStretchX = if bitmapInDeviceSpace then m.M11 / m.M22 else 1.0
             for run in runs do
                 let fontSize = run.FontSize
-                let ppem = max 1 (int (round fontSize))
-                if Text.isBitmapFont run.Font || ppem <= 48 then
-                    // Bitmap glyph atlas path — pixel-perfect for small text
+                let bitmapSize = if bitmapInDeviceSpace then fontSize * m.M22 else fontSize
+                let ppem = max 1 (int (round bitmapSize))
+                if Text.isBitmapFont run.Font || (bitmapInDeviceSpace && ppem <= 48) then
+                    // Axis-aligned scale/translation is baked into glyph resolution
+                    // and positions; preserve horizontal stretch on the device quad.
                     let entries =
                         run.Glyphs |> Array.choose (fun g ->
                             // Bake the sub-pixel offset into the cached bitmap (as the raster path does),
                             // so every glyph in the run shares one baseline instead of rounding per-glyph.
-                            let wx = ox + g.X
-                            let wy = oy + g.Y
+                            let wx = if bitmapInDeviceSpace then ((ox + g.X) * m.M11 + m.DX) / bitmapStretchX else ox + g.X
+                            let wy = if bitmapInDeviceSpace then (oy + g.Y) * m.M22 + m.DY else oy + g.Y
                             let dstX = int (floor wx)
                             let dstY = int (floor wy)
                             let subX = int (floor ((wx - float dstX) * 4.0)) |> max 0 |> min 3
@@ -2000,9 +2004,9 @@ void main() {
                     let verts = Array.zeroCreate<float32> (entries.Length * 6 * 4)
                     let mutable vi = 0
                     for (dstX, dstY, entry) in entries do
-                        let x0 = float32 (dstX + entry.BearingX)
+                        let x0 = float32 (float (dstX + entry.BearingX) * bitmapStretchX)
                         let y0 = float32 (dstY + entry.BearingY)
-                        let x1 = x0 + float32 entry.W
+                        let x1 = x0 + float32 (float entry.W * bitmapStretchX)
                         let y1 = y0 + float32 entry.H
                         verts.[vi] <- x0; verts.[vi+1] <- y0; verts.[vi+2] <- entry.U0; verts.[vi+3] <- entry.V0; vi <- vi + 4
                         verts.[vi] <- x1; verts.[vi+1] <- y0; verts.[vi+2] <- entry.U1; verts.[vi+3] <- entry.V0; vi <- vi + 4
@@ -2014,7 +2018,7 @@ void main() {
                     let ts = BitmapTextShader.getShader ()
                     if entries.Length > 0 && vi > 0 then
                         Gl.glUseProgram(ts.Program)
-                        Gl.glUniformMatrix4fv(ts.LocMVP, 1, false, mvp)
+                        Gl.glUniformMatrix4fv(ts.LocMVP, 1, false, if bitmapInDeviceSpace then orthoBase else mvp)
                         let (cr, cg, cb, ca) =
                             match paint with
                             | Solid c ->
@@ -2037,7 +2041,8 @@ void main() {
                         Gl.glDisableVertexAttribArray(ts.LocUV)
                         restoreMainState st
                 elif fontSize <= 80.0 then
-                    // SDF atlas path (with mipmaps for proper minification filtering)
+                    // Distance fields remain scalable under a transformed small
+                    // font; unlike bitmap glyphs they retain subpixel coverage.
                     let atlas = SdfAtlas.getAtlas run.Font
                     let entries =
                         run.Glyphs |> Array.map (fun g -> (g, SdfAtlas.ensureGlyph atlas run.Font g.GlyphId))
@@ -2067,7 +2072,7 @@ void main() {
                         let gh = float32 (entry.GlyphH * fontSize)
                         let maxDim = max gw gh
                         let cellSize =
-                            if maxDim > 0.1f then maxDim * float32 SdfAtlas.SdfSize / float32 (SdfAtlas.SdfSize - 2 * SdfAtlas.SdfPadding)
+                            if maxDim > 0.0f then maxDim * float32 SdfAtlas.SdfSize / float32 (SdfAtlas.SdfSize - 2 * SdfAtlas.SdfPadding)
                             else float32 fontSize * 0.3f
                         let padX = (cellSize - gw) / 2.0f
                         let padY = (cellSize - gh) / 2.0f
@@ -2107,7 +2112,7 @@ void main() {
                         Gl.glDisableVertexAttribArray(ts.LocUV)
                         restoreMainState st
                 else
-                    // Vector path for large text: outline → stencil fill
+                    // Vector path for large text: outline → stencil fill.
                     let s = fontSize / Text.unitsPerEm run.Font
                     for g in run.Glyphs do
                         let outline = Text.glyphOutline run.Font g.GlyphId

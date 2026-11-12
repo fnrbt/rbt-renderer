@@ -95,6 +95,21 @@ Painting a color over the same opaque color therefore preserves every component
 at every source alpha; truncation previously shifted encoded ICC components
 before the group's display conversion.
 
+GL text atlas resolution is selected in device space for positive axis-aligned
+scales. Glyph positions include the transform before subpixel quantization;
+horizontal stretch is preserved on the device-space quad. This prevents a
+one-point source glyph under a larger text matrix becoming an enlarged pixel
+block. Other transformed outline text uses scalable distance fields or outlines,
+not the untransformed small bitmap. Subpoint SDF quads retain their true bounds.
+
+The focused GL regression mode checks scale, nonuniform stretch, rotation,
+skew and reflection at source sizes 1 and 0.01, plus exact small-text scale
+equivalence at device sizes 7 and 7.5. With Mesa EGL/GLES libraries installed:
+
+```sh
+EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 dotnet run --project textbench -c Release -- NotoSans-Regular.ttf /tmp/renderer-gl-check --gl-transforms
+```
+
 Transparency groups on GL use CPU readback/compositing and upload, including
 `ColorManagedGroup`; they are not a zero-readback direct-presentation path.
 `Filtered` and `BackdropFilter` run built-in color/blur passes on GL; `Custom`

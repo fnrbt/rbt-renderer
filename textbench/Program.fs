@@ -117,6 +117,53 @@ let reloadFont (fontPath: string) =
     Raster.clearGlyphBitmapCache ()
     Text.loadFontFile fontPath
 
+// Small source glyphs under large transforms must retain their outline, not
+// expand a one-pixel atlas entry. Compare coverage with the CPU outline renderer.
+let checkGlTransforms font =
+    let transforms =
+        [ "scale", { M11 = 48.0; M12 = 0.0; M21 = 0.0; M22 = 48.0; DX = 20.0; DY = 90.0 }
+          "stretch", { M11 = 72.0; M12 = 0.0; M21 = 0.0; M22 = 48.0; DX = 20.0; DY = 90.0 }
+          "rotate", { M11 = 0.0; M12 = 48.0; M21 = -48.0; M22 = 0.0; DX = 40.0; DY = 40.0 }
+          "skew", { M11 = 48.0; M12 = 12.0; M21 = 15.0; M22 = 48.0; DX = 40.0; DY = 90.0 }
+          "reflect", { M11 = -48.0; M12 = 0.0; M21 = 0.0; M22 = 48.0; DX = 110.0; DY = 90.0 } ]
+    let cases =
+        [ for size in [1.0; 0.01] do
+            for name, transform in transforms do
+                yield size, name,
+                    { transform with
+                        M11 = transform.M11 / size; M12 = transform.M12 / size
+                        M21 = transform.M21 / size; M22 = transform.M22 / size } ]
+    for size, name, transform in cases do
+        let runs = Text.layout font size "H"
+        let commands =
+            [ Clear Color.white
+              Group(transform, 1.0, [DrawGlyphs(vec2 0.0 0.0, runs, Solid Color.black)]) ]
+        let expected = Scene.render (Raster.create ()) 160 160 commands
+        let actual = Scene.render (GlBackend.create ()) 160 160 commands
+        let mutable intersection = 0
+        let mutable union = 0
+        for i = 0 to expected.Px.Length - 1 do
+            let a = Pixel.r expected.Px.Span.[i] < 128uy
+            let b = Pixel.r actual.Px.Span.[i] < 128uy
+            if a && b then intersection <- intersection + 1
+            if a || b then union <- union + 1
+        let overlap = if union = 0 then 0.0 else float intersection / float union
+        if overlap < 0.85 then failwithf "%s at %g: GL glyph coverage differs from CPU outline (IoU %.3f)" name size overlap
+        printfn "PASS transformed GL glyph %s at %g (coverage IoU %.3f)" name size overlap
+    for deviceSize in [7.0; 7.5] do
+        let draw size transform =
+            Scene.render (GlBackend.create ()) 100 100
+                [ Clear Color.white
+                  Group(transform, 1.0, [DrawGlyphs(vec2 0.0 0.0, Text.layout font size "H", Solid Color.black)]) ]
+        let placement = Matrix3x2.translate 30.25 60.5
+        let expected = draw deviceSize placement
+        let actual = draw 1.0 (Matrix3x2.multiply (Matrix3x2.scale deviceSize deviceSize) placement)
+        let mutable equal = true
+        for i = 0 to expected.Px.Length - 1 do
+            if expected.Px.Span.[i] <> actual.Px.Span.[i] then equal <- false
+        if not equal then failwithf "Scaled small GL glyph loses device-space coverage at %g" deviceSize
+        printfn "PASS small GL glyph scale equivalence at %g" deviceSize
+
 // ── Main entry point ──
 
 [<EntryPoint>]
@@ -147,6 +194,9 @@ let main argv =
     printfn ""
 
     let mutable font = Text.loadFontFile fontPath
+    if Array.contains "--gl-transforms" argv then
+        checkGlTransforms font
+        exit 0
     let mutable results : CompareResult list = []
 
     // ── Run all quality test cases ──
