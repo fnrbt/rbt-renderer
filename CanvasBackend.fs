@@ -54,6 +54,105 @@ let private layerFor (ctx: CanvasRenderingContext2D) width height =
     let layer = getOffscreenContext2D canvas
     emitJsExpr (layer, ctx) "$0.setTransform($1.getTransform())"
     canvas, layer
+// Conservative device-space bounds. Unsupported operations deliberately use
+// the whole surface; clipping can only reduce the bounds of supported paints.
+let private componentBounds width height (initial: Matrix3x2) commands =
+    let mutable loX = infinity
+    let mutable loY = infinity
+    let mutable hiX = -infinity
+    let mutable hiY = -infinity
+    let mutable unknown = false
+    let includePoint (m: Matrix3x2) x y margin =
+        let x', y' = m.M11*x + m.M21*y + m.DX, m.M12*x + m.M22*y + m.DY
+        let mx = margin * (abs m.M11 + abs m.M21)
+        let my = margin * (abs m.M12 + abs m.M22)
+        if System.Double.IsNaN x' || System.Double.IsInfinity x' ||
+           System.Double.IsNaN y' || System.Double.IsInfinity y' ||
+           System.Double.IsNaN mx || System.Double.IsInfinity mx ||
+           System.Double.IsNaN my || System.Double.IsInfinity my then unknown <- true
+        else
+            loX <- min loX (x'-mx); hiX <- max hiX (x'+mx)
+            loY <- min loY (y'-my); hiY <- max hiY (y'+my)
+    let point m (p: Vec2) margin = includePoint m (float p.X) (float p.Y) margin
+    let rectangle m (r: Rect) margin =
+        let x, y = float r.Pos.X, float r.Pos.Y
+        let x2, y2 = x + float r.Size.X, y + float r.Size.Y
+        includePoint m x y margin; includePoint m x2 y margin
+        includePoint m x y2 margin; includePoint m x2 y2 margin
+    let path m segments margin =
+        for segment in segments do
+            match segment with
+            | MoveTo p | LineTo p -> point m p margin
+            | QuadTo (c,p) -> point m c margin; point m p margin
+            | CubicTo (a,b,p) -> point m a margin; point m b margin; point m p margin
+            | ArcTo _ -> unknown <- true
+            | Close -> ()
+    let rec visit m command =
+        match command with
+        | Group (child, _, children) ->
+            let combined = Matrix3x2.multiply child m
+            for c in children do visit combined c
+        | ColorManagedGroup4 (_, _, false, _, mode, mask, children)
+        | ColorManagedGroup (_, _, false, _, mode, mask, children)
+        | TransparencyGroup (_, false, _, mode, mask, children) ->
+            match mode with
+            | SrcIn | SrcOut | DstAtop -> unknown <- true
+            | _ ->
+                for c in children do visit m c
+                match mask with
+                | Some cs -> for c in cs do visit m c
+                | None -> ()
+        | Blend (mode, children) ->
+            match mode with
+            | SrcIn | SrcOut | DstAtop -> unknown <- true
+            | _ -> for c in children do visit m c
+        | Mask (mask, children) ->
+            for c in mask do visit m c
+            for c in children do visit m c
+        | Components4 (first, fourth) -> visit m first; visit m fourth
+        | Clip (_, _, children) | AntiAlias (_, children) | SaveRestore children
+        | WithShape (_, children) -> for c in children do visit m c
+        | FillPath (segments, _, _) -> path m segments 0.0
+        | StrokePath (segments, style) ->
+            if style.Width <= 0.0<px> then unknown <- true
+            else path m segments (float style.Width * max 10.0 (abs style.MiterLimit))
+        | FillRect (r, _) -> rectangle m r 0.0
+        | DrawImage (_, _, r, _) | DrawImageReduced (_, _, r, _) -> rectangle m r 0.0
+        | DrawGlyphs (origin, runs, _) ->
+            for run in runs do
+                let upm = Text.unitsPerEm run.Font
+                if upm > 0.0 then
+                    let scale = run.FontSize / upm
+                    for glyph in run.Glyphs do
+                        match CanvasGlyphCache.get run.Font glyph.GlyphId with
+                        | None -> ()
+                        | Some geometry ->
+                            match geometry.Bounds with
+                            | None -> unknown <- true
+                            | Some bounds ->
+                                let placement =
+                                    { M11 = scale; M12 = 0.0; M21 = 0.0; M22 = scale
+                                      DX = float origin.X + glyph.X; DY = float origin.Y + glyph.Y }
+                                rectangle (Matrix3x2.multiply placement m) bounds 0.0
+        | Line (a,b,_,w) ->
+            let margin = max 1.0 (abs (float w))
+            point m a margin; point m b margin
+        | _ -> unknown <- true
+    for command in commands do visit initial command
+    if unknown then 0, 0, width, height
+    elif loX = infinity then 0, 0, 0, 0
+    else
+        let x0 = int (max 0.0 (min (float width) (floor (loX-2.0))))
+        let y0 = int (max 0.0 (min (float height) (floor (loY-2.0))))
+        let x1 = int (max 0.0 (min (float width) (ceil (hiX+2.0))))
+        let y1 = int (max 0.0 (min (float height) (ceil (hiY+2.0))))
+        x0, y0, max 0 (x1-x0), max 0 (y1-y0)
+
+let private contextMatrix (ctx: CanvasRenderingContext2D) =
+    let a,b,c,d,e,f : float*float*float*float*float*float =
+        emitJsExpr ctx "(function(m){return [m.a,m.b,m.c,m.d,m.e,m.f]})($0.getTransform())"
+    { M11 = a; M12 = b; M21 = c; M22 = d; DX = e; DY = f }
+
 
 let private drawLayer (ctx: CanvasRenderingContext2D) canvas operation opacity =
     ctx.save()
@@ -242,6 +341,35 @@ let rec private ensureComponentSample (command: Cmd) =
         let tag : string = emitJsExpr other "($0.tag !== undefined ? $0.tag : 'unknown')"
         invalidOp (sprintf "CanvasBackend: unsupported component paint %s" tag)
 
+// Keep original device coordinates: translating glyphs into a smaller canvas
+// can change Canvas coverage through rasterizer precision. Reuse the backing
+// surface, clearing and reading only the bounded paint rectangle.
+let private componentRaster width height (matrix: Matrix3x2) readFrequently paintCommand : Cmd list -> ComponentCompositor.RasterRect =
+    let scratch = lazy (
+        let canvas = createOffscreenCanvas width height
+        let context =
+            if readFrequently then getOffscreenContext2DReadFrequent canvas
+            else getOffscreenContext2D canvas
+        canvas, context)
+    let mutable previous = (0, 0, 0, 0)
+    fun commands ->
+        for command in commands do ensureComponentSample command
+        let x, y, w, h = componentBounds width height matrix commands
+        let packed =
+            if w = 0 || h = 0 then Array.empty
+            else
+                let canvas, context = scratch.Value
+                let px, py, pw, ph = previous
+                context.clearRect(float px, float py, float pw, float ph)
+                previous <- (x, y, w, h)
+                context.save()
+                try
+                    context.setTransform(matrix.M11, matrix.M12, matrix.M21, matrix.M22, matrix.DX, matrix.DY)
+                    for command in commands do paintCommand context command
+                    CanvasImage.pixelsFromRegion canvas x y w h
+                finally context.restore()
+        { X = x; Y = y; Width = w; Height = h; Pixels = packed }
+
 // ── Main interpreter ─────────────────────────────────────
 
 let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
@@ -270,13 +398,12 @@ let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
     | ColorManagedGroup4 _ ->
         let width, height = canvasSize ctx
         let pixels = pixelsFromContext ctx width height
-        let paint commands =
-            let layer, layerContext = layerFor ctx width height
-            for command in commands do
-                ensureComponentSample command
-                execute layerContext command
-            CanvasImage.pixelsFromCanvas layer
-        ComponentCompositor.render width height pixels paint cmd
+        let matrix = contextMatrix ctx
+        let paint = componentRaster width height matrix false execute
+        let bounds commands : ComponentCompositor.Bounds =
+            let x,y,w,h = componentBounds width height matrix commands
+            { X = x; Y = y; Width = w; Height = h }
+        ComponentCompositor.render width height pixels paint bounds cmd
         drawCompositedPixels ctx width height pixels
     | Components4 _ ->
         invalidOp "CanvasBackend: Components4 requires a ColorManagedGroup4"
@@ -394,11 +521,11 @@ let rec private execute (ctx: CanvasRenderingContext2D) (cmd: Cmd) =
                     let s = run.FontSize / upm
                     for g in run.Glyphs do
                         match CanvasGlyphCache.get run.Font g.GlyphId with
-                        | Some path ->
+                        | Some geometry ->
                             ctx.save()
                             ctx.translate(float origin.X + g.X, float origin.Y + g.Y)
                             ctx.scale(s, s)
-                            ctxFillPath ctx path "nonzero"
+                            ctxFillPath ctx geometry.Path "nonzero"
                             ctx.restore()
                         | None -> ()
         | _ -> ()
@@ -524,12 +651,9 @@ let rasterize width height commands =
 /// Rasterize a CMYK pattern or soft mask into first-three-component and K
 /// planes. The two planes share premultiplied alpha and image-space coordinates.
 let rasterizeComponents width height commands : Framebuffer * Framebuffer =
-    let paint geometry =
-        let canvas = createOffscreenCanvas width height
-        let context = getOffscreenContext2DReadFrequent canvas
-        for command in geometry do
-            ensureComponentSample command
-            execute context command
-        CanvasImage.pixelsFromCanvas canvas
-    let first, fourth = ComponentCompositor.renderComponents width height paint true commands
+    let paint = componentRaster width height Matrix3x2.identity true execute
+    let bounds geometry : ComponentCompositor.Bounds =
+        let x,y,w,h = componentBounds width height Matrix3x2.identity geometry
+        { X = x; Y = y; Width = w; Height = h }
+    let first, fourth = ComponentCompositor.renderComponents width height paint bounds true commands
     Framebuffer.ofArray first width height, Framebuffer.ofArray fourth width height

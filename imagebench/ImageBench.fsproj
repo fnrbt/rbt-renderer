@@ -7,6 +7,9 @@
   <ItemGroup>
     <ProjectReference Include="../Rbt.Renderer.fsproj" />
     <Compile Include="Fixtures.fs" />
+    <Compile Include="ScanlineRegression.fs" />
+    <Compile Include="ComponentSparseRegression.fs" />
+    <Compile Include="ComponentBoundsRegression.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 </Project>

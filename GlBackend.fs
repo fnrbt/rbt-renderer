@@ -922,7 +922,7 @@ void main() {
             let pixels = backdrop.Px.ToArray()
             let scratch = Framebuffer.create st.W st.H (Color.rgba 0uy 0uy 0uy 0uy)
             Gl.glDisable(Gl.GL_STENCIL_TEST)
-            let renderObject commands =
+            let renderObject commands : ComponentCompositor.RasterRect =
                 scratch.Px.Span.Clear()
                 let target = renderToOffscreen st orthoBase m scratch commands st.W st.H
                 Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, target.Fbo)
@@ -936,8 +936,9 @@ void main() {
                 releaseFbo st.FboPool target
                 Gl.glDisable(Gl.GL_STENCIL_TEST)
                 restoreMainState st
-                output.Px.ToArray()
-            ComponentCompositor.render st.W st.H pixels renderObject cmd
+                { ComponentCompositor.RasterRect.X = 0; Y = 0; Width = st.W; Height = st.H; Pixels = output.Px.ToArray() }
+            let bounds _ : ComponentCompositor.Bounds = { X = 0; Y = 0; Width = st.W; Height = st.H }
+            ComponentCompositor.render st.W st.H pixels renderObject bounds cmd
             pixels.AsSpan().CopyTo(backdrop.Px.Span)
             Gl.glBindFramebuffer(Gl.GL_FRAMEBUFFER, st.ActiveFbo)
             restoreParentStencil clipActive

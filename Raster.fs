@@ -1100,15 +1100,14 @@ module Raster =
                     xs.Clear()
                     let scanY = float row + (float s + 0.5) / float n
                     for contour in contours do
-                        let pts = contour
-                        let len = List.length pts
-                        if len >= 2 then
-                            for i = 0 to len - 2 do
-                                let (x0, y0) = pts.[i]
-                                let (x1, y1) = pts.[i + 1]
-                                if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
-                                    let t = (scanY - y0) / (y1 - y0)
-                                    xs.Add(x0 + t * (x1 - x0))
+                        let mutable pts = contour
+                        while not pts.IsEmpty && not pts.Tail.IsEmpty do
+                            let (x0, y0) = pts.Head
+                            let (x1, y1) = pts.Tail.Head
+                            if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
+                                let t = (scanY - y0) / (y1 - y0)
+                                xs.Add(x0 + t * (x1 - x0))
+                            pts <- pts.Tail
                     xs.Sort()
                     let mutable j = 0
                     while j + 1 < xs.Count do
@@ -1127,17 +1126,16 @@ module Raster =
                     crossings.Clear()
                     let scanY = float row + (float s + 0.5) / float n
                     for contour in contours do
-                        let pts = contour
-                        let len = List.length pts
-                        if len >= 2 then
-                            for i = 0 to len - 2 do
-                                let (x0, y0) = pts.[i]
-                                let (x1, y1) = pts.[i + 1]
-                                if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
-                                    let t = (scanY - y0) / (y1 - y0)
-                                    let xHit = x0 + t * (x1 - x0)
-                                    let dir = if y0 < y1 then 1 else -1
-                                    crossings.Add(xHit, dir)
+                        let mutable pts = contour
+                        while not pts.IsEmpty && not pts.Tail.IsEmpty do
+                            let (x0, y0) = pts.Head
+                            let (x1, y1) = pts.Tail.Head
+                            if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
+                                let t = (scanY - y0) / (y1 - y0)
+                                let xHit = x0 + t * (x1 - x0)
+                                let dir = if y0 < y1 then 1 else -1
+                                crossings.Add(xHit, dir)
+                            pts <- pts.Tail
                     crossings.Sort(fun (a, _) (b, _) -> compare a b)
                     let mutable winding = 0
                     let mutable j = 0
@@ -1187,15 +1185,14 @@ module Raster =
                         xs.Clear()
                         let scanY = float row + (float s + 0.5) / float n
                         for contour in contours do
-                            let pts = contour
-                            let len = List.length pts
-                            if len >= 2 then
-                                for i = 0 to len - 2 do
-                                    let (x0, y0) = pts.[i]
-                                    let (x1, y1) = pts.[i + 1]
-                                    if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
-                                        let t = (scanY - y0) / (y1 - y0)
-                                        xs.Add(x0 + t * (x1 - x0))
+                            let mutable pts = contour
+                            while not pts.IsEmpty && not pts.Tail.IsEmpty do
+                                let (x0, y0) = pts.Head
+                                let (x1, y1) = pts.Tail.Head
+                                if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
+                                    let t = (scanY - y0) / (y1 - y0)
+                                    xs.Add(x0 + t * (x1 - x0))
+                                pts <- pts.Tail
                         xs.Sort()
                         let mutable j = 0
                         while j + 1 < xs.Count do
@@ -1215,17 +1212,16 @@ module Raster =
                         crossings.Clear()
                         let scanY = float row + (float s + 0.5) / float n
                         for contour in contours do
-                            let pts = contour
-                            let len = List.length pts
-                            if len >= 2 then
-                                for i = 0 to len - 2 do
-                                    let (x0, y0) = pts.[i]
-                                    let (x1, y1) = pts.[i + 1]
-                                    if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
-                                        let t = (scanY - y0) / (y1 - y0)
-                                        let xHit = x0 + t * (x1 - x0)
-                                        let dir = if y0 < y1 then 1 else -1
-                                        crossings.Add(xHit, dir)
+                            let mutable pts = contour
+                            while not pts.IsEmpty && not pts.Tail.IsEmpty do
+                                let (x0, y0) = pts.Head
+                                let (x1, y1) = pts.Tail.Head
+                                if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
+                                    let t = (scanY - y0) / (y1 - y0)
+                                    let xHit = x0 + t * (x1 - x0)
+                                    let dir = if y0 < y1 then 1 else -1
+                                    crossings.Add(xHit, dir)
+                                pts <- pts.Tail
                         crossings.Sort(fun (a, _) (b, _) -> compare a b)
                         let mutable winding = 0
                         let mutable j = 0
@@ -1273,15 +1269,14 @@ module Raster =
                     xs.Clear()
                     let scanY = float row + (float s + 0.5) / float n
                     for contour in contours do
-                        let pts = contour
-                        let len = List.length pts
-                        if len >= 2 then
-                            for i = 0 to len - 2 do
-                                let (x0, y0) = pts.[i]
-                                let (x1, y1) = pts.[i + 1]
-                                if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
-                                    let t = (scanY - y0) / (y1 - y0)
-                                    xs.Add(x0 + t * (x1 - x0))
+                        let mutable pts = contour
+                        while not pts.IsEmpty && not pts.Tail.IsEmpty do
+                            let (x0, y0) = pts.Head
+                            let (x1, y1) = pts.Tail.Head
+                            if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
+                                let t = (scanY - y0) / (y1 - y0)
+                                xs.Add(x0 + t * (x1 - x0))
+                            pts <- pts.Tail
                     xs.Sort()
                     let mutable j = 0
                     while j + 1 < xs.Count do
@@ -1298,17 +1293,16 @@ module Raster =
                     crossings.Clear()
                     let scanY = float row + (float s + 0.5) / float n
                     for contour in contours do
-                        let pts = contour
-                        let len = List.length pts
-                        if len >= 2 then
-                            for i = 0 to len - 2 do
-                                let (x0, y0) = pts.[i]
-                                let (x1, y1) = pts.[i + 1]
-                                if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
-                                    let t = (scanY - y0) / (y1 - y0)
-                                    let xHit = x0 + t * (x1 - x0)
-                                    let dir = if y0 < y1 then 1 else -1
-                                    crossings.Add(xHit, dir)
+                        let mutable pts = contour
+                        while not pts.IsEmpty && not pts.Tail.IsEmpty do
+                            let (x0, y0) = pts.Head
+                            let (x1, y1) = pts.Tail.Head
+                            if (y0 <= scanY && y1 > scanY) || (y1 <= scanY && y0 > scanY) then
+                                let t = (scanY - y0) / (y1 - y0)
+                                let xHit = x0 + t * (x1 - x0)
+                                let dir = if y0 < y1 then 1 else -1
+                                crossings.Add(xHit, dir)
+                            pts <- pts.Tail
                     crossings.Sort(fun (a, _) (b, _) -> compare a b)
                     let mutable winding = 0
                     let mutable j = 0
@@ -3391,12 +3385,13 @@ module Raster =
             match Framebuffer.tryGetArray fb with
             | Some pixels when pixels.Length = fb.W * fb.H -> pixels, false
             | _ -> fb.Px.ToArray(), true
-        let renderObject commands =
+        let renderObject commands : ComponentCompositor.RasterRect =
             let result = Array.zeroCreate<uint32> (fb.W * fb.H)
             let target = Framebuffer.ofArray result fb.W fb.H
             commands |> List.iter (dispatchWithTransformAA target m aaSamples)
-            result
-        ComponentCompositor.render fb.W fb.H pixels renderObject cmd
+            { ComponentCompositor.RasterRect.X = 0; Y = 0; Width = fb.W; Height = fb.H; Pixels = result }
+        let bounds _ : ComponentCompositor.Bounds = { X = 0; Y = 0; Width = fb.W; Height = fb.H }
+        ComponentCompositor.render fb.W fb.H pixels renderObject bounds cmd
         if copyBack then System.Span<uint32>(pixels).CopyTo(fb.Px.Span)
 
 
@@ -3406,13 +3401,14 @@ module Raster =
     /// Rasterize an offscreen four-component surface. Both returned images
     /// have the same premultiplied alpha; the fourth component is grayscale.
     let rasterizeComponents width height transform aaSamples complement commands =
-        let renderObject children =
+        let renderObject children : ComponentCompositor.RasterRect =
             let pixels = Array.zeroCreate<uint32> (width * height)
             let target = Framebuffer.ofArray pixels width height
             children |> List.iter (dispatchWithTransformAA target transform aaSamples)
-            pixels
+            { ComponentCompositor.RasterRect.X = 0; Y = 0; Width = width; Height = height; Pixels = pixels }
+        let bounds _ : ComponentCompositor.Bounds = { X = 0; Y = 0; Width = width; Height = height }
         let first, fourth =
-            ComponentCompositor.renderComponents width height renderObject complement commands
+            ComponentCompositor.renderComponents width height renderObject bounds complement commands
         Framebuffer.ofArray first width height, Framebuffer.ofArray fourth width height
 
     let create () : Backend =

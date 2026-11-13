@@ -5,14 +5,31 @@ open Fable.Core.JsInterop
 open Rbt.Renderer
 open Rbt.Renderer.CanvasApi
 
-/// Read a browser surface as premultiplied BGRA pixels.
-let pixelsFromCanvas (oc: OffscreenCanvas) =
-    let imageData = (getOffscreenContext2DReadFrequent oc).getImageData(0.0, 0.0, float oc.width, float oc.height)
+/// Read a device-pixel rectangle as tightly packed premultiplied BGRA.
+let pixelsFromRegion (oc: OffscreenCanvas) x y width height : uint32[] =
+    let imageData = (getOffscreenContext2DReadFrequent oc).getImageData(float x, float y, float width, float height)
     let rgba: uint32[] = emitJsExpr imageData.data "new Uint32Array($0.buffer)"
-    rgba |> Array.map (fun v ->
-        let a = v >>> 24
-        let channel shift = (((v >>> shift) &&& 255u) * a + 127u) / 255u
-        channel 16 ||| (channel 8 <<< 8) ||| (channel 0 <<< 16) ||| (a <<< 24))
+    // getImageData owns this buffer, so it can be converted in place. Most
+    // component-object layers are transparent; skip their channel arithmetic.
+    emitJsExpr rgba """(function(p) {
+        for (let i = 0; i < p.length; i++) {
+            const v = p[i], a = v >>> 24;
+            if (a === 0) p[i] = 0;
+            else if (a === 255)
+                p[i] = (v & 0xff00ff00) | ((v & 255) << 16) | ((v >>> 16) & 255);
+            else {
+                const b = (((v >>> 16) & 255) * a + 127) / 255 | 0;
+                const g = (((v >>> 8) & 255) * a + 127) / 255 | 0;
+                const r = ((v & 255) * a + 127) / 255 | 0;
+                p[i] = b | (g << 8) | (r << 16) | (a << 24);
+            }
+        }
+        return p;
+    })($0)"""
+
+/// Read an entire browser surface as premultiplied BGRA pixels.
+let pixelsFromCanvas (oc: OffscreenCanvas) : uint32[] =
+    pixelsFromRegion oc 0 0 (int oc.width) (int oc.height)
 
 // ── Framebuffer → OffscreenCanvas cache ──────────────────
 // Keyed by fb.Px (uint32[]) identity via JS WeakMap.

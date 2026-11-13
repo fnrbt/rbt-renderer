@@ -170,6 +170,48 @@ dotnet run --project imagebench/ImageBench.fsproj -c Release
 EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 dotnet run --project imagebench/ImageBench.fsproj -c Release -- --gl
 ```
 
+Native antialiased solid/gradient fills and clip masks traverse polygon edges
+linearly rather than repeatedly indexing F# linked lists. This removes quadratic
+edge traversal without changing edge order or coverage math. The imagebench
+checks a 12,000-vertex degenerate contour against its four-vertex equivalent for
+both winding rules, solid/gradient paint and clip coverage; the CPU run passed.
+In the PDF corpus, UNESCO Bhasha page 50 now renders at an 800-pixel maximum side
+in 7.8 seconds instead of exceeding the 120-second timeout. This is one observed
+native run using the local Rbt.Renderer 0.1.17 build, not a browser benchmark.
+
+Browser worker profiles identified repeated full-surface component work.
+`ComponentCompositor` accepts a tightly packed `RasterRect` callback and a
+conservative device-space `Bounds` callback. Eligible nested groups evaluate
+on region-local float32 surfaces, copying backdrop components without an
+eight-bit RGB roundtrip. Contribution alpha is merged back only in that region.
+Native and GL callbacks return the full surface; Canvas proves tighter bounds.
+
+Sparse unpacking skips zero pixels and uses direct Fable writes only within
+validated raster rectangles. Simple component paints bound composition, alpha
+accumulation and scratch clearing to their written region. Unsupported geometry,
+knockout groups and transparent-source-affecting operators retain safe full
+processing. Canvas glyph paths cache conservative control-point bounds.
+
+Canvas keeps one reusable scratch surface in the original device coordinates.
+Only its affected rectangle is cleared and read back. Translating geometry into
+a smaller canvas changed glyph coverage in an actual browser probe, so that
+approach was rejected. `CanvasImage.pixelsFromRegion` converts the fresh
+ImageData buffer in place with unchanged premultiplication rounding.
+
+The independent scalar component oracle, dense-contour regression, and new
+component placement/clip/transform/stroke/alpha regression pass. The latter
+allows one channel value only when comparing float component Multiply against
+the separate byte-quantized native RGB compositor. Native PDF transparency,
+knockout and ICC regressions pass. Ten actual Canvas scenes and four glyph
+placement scenarios preserve exact output against the pre-change renderer.
+
+Combined with PDF-owned per-page ICC parsing/resource-name caches, Bhasha page
+100 now takes 2.12 seconds rather than the earlier 39.14 seconds at 601×800;
+pdf.js took 0.216 seconds in that run. All 480,800 page pixels remain identical.
+These are individual observations, not benchmark thresholds or performance
+parity. Evidence lives in the sibling PDF corpus's `results/bounded-compositor/`.
+These renderer changes are released together as Core, Canvas and native 0.1.17.
+
 Transparency groups on GL use CPU readback/compositing and upload, including
 `ColorManagedGroup`; they are not a zero-readback direct-presentation path.
 `Filtered` and `BackdropFilter` run built-in color/blur passes on GL; `Custom`

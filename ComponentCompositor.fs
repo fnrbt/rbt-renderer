@@ -3,6 +3,32 @@ namespace Rbt.Renderer
 /// Component-space transparency. Surfaces store premultiplied straight-space
 /// components followed by alpha, in a Fable-compatible Float32Array.
 module ComponentCompositor =
+    /// A tightly packed premultiplied raster rectangle in device coordinates.
+    type RasterRect =
+        { X: int; Y: int; Width: int; Height: int; Pixels: uint32[] }
+
+    /// Conservative device-space rectangle containing every pixel a command
+    /// can affect, including effects of transparent source pixels. Backends
+    /// must return the full surface when they cannot prove a tighter bound.
+    type Bounds = { X: int; Y: int; Width: int; Height: int }
+
+    // All accesses through this helper are inside loops bounded by the
+    // validated surface length. Fable's checked Array.item call on each pixel
+    // dominates sparse component compositing in the browser.
+#if FABLE_COMPILER
+    [<Fable.Core.Emit("$0[$1]")>]
+    let private pixelAt (a: 'T[]) (i: int) : 'T = Fable.Core.Util.jsNative
+#else
+    let inline private pixelAt (a: 'T[]) (i: int) : 'T = a.[i]
+#endif
+
+#if FABLE_COMPILER
+    [<Fable.Core.Emit("$0[$1] = $2")>]
+    let private setPixel (a: 'T[]) (i: int) (value: 'T) : unit = Fable.Core.Util.jsNative
+#else
+    let inline private setPixel (a: 'T[]) (i: int) (value: 'T) = a.[i] <- value
+#endif
+
     let inline private clamp x = max 0.0 (min 1.0 x)
     let inline private get (a: float32[]) i = float a.[i]
     let inline private put (a: float32[]) i v = a.[i] <- float32 (clamp v)
@@ -49,18 +75,21 @@ module ComponentCompositor =
         | Luminosity -> setLum br bg bb (lum sr sg sb)
         | _ -> struct(sr,sg,sb)
 
+    let private compositeNormalRange (dst: float32[]) (src: float32[]) count first last =
+        for p = first to last do
+            let i = p*5
+            let sa = pixelAt src (i+4)
+            if sa > 0.0f then
+                let inv = 1.0f-sa
+                for c = 0 to count-1 do
+                    dst.[i+c] <- src.[i+c] + dst.[i+c]*inv
+                dst.[i+4] <- sa + dst.[i+4]*inv
+
     // src and dst are premultiplied; complement only the inputs to the blend
     // function, never the storage or the color-space conversion callbacks.
     let private composite (dst: float32[]) (src: float32[]) count complement mode =
         if mode = Normal then
-            for p = 0 to dst.Length / 5 - 1 do
-                let i = p*5
-                let sa = src.[i+4]
-                if sa > 0.0f then
-                    let inv = 1.0f-sa
-                    for c = 0 to count-1 do
-                        dst.[i+c] <- src.[i+c] + dst.[i+c]*inv
-                    dst.[i+4] <- sa + dst.[i+4]*inv
+            compositeNormalRange dst src count 0 (dst.Length / 5 - 1)
         else
             let nonsep = match mode with Hue | Saturation | ColorMode | Luminosity -> true | _ -> false
             for p = 0 to dst.Length / 5 - 1 do
@@ -120,14 +149,51 @@ module ComponentCompositor =
             a.[i+4] <- float32 (Pixel.a v) / 255.0f
         a
 
-    let private renderCore (width: int) (height: int) (pixels: uint32[]) (raster: Cmd list -> uint32[]) count complement command =
+    let rec private renderCore (width: int) (height: int) (surface: float32[]) (raster: Cmd list -> RasterRect) (bounds: Cmd list -> Bounds) count complement command (alphaOut: float32[] option) allowRootBounds =
         let n = width*height
-        if pixels.Length <> n then invalidArg "pixels" "Incorrect surface size"
+        if surface.Length <> n*5 then invalidArg "surface" "Incorrect surface size"
+        let mutable firstCommand = true
         let rasterOne wrap cmd =
             let result = raster [wrap cmd]
-            if result.Length <> n then invalidArg "raster" "Incorrect surface size"
+            if result.X < 0 || result.Y < 0 || result.Width < 0 || result.Height < 0 ||
+               result.X > width || result.Y > height || result.Width > width-result.X ||
+               result.Height > height-result.Y || result.Pixels.Length <> result.Width*result.Height then
+                invalidArg "raster" "Incorrect raster rectangle"
             result
         let alphaOf (v:uint32) = float (Pixel.a v)/255.0
+        let mutable componentX = 0
+        let mutable componentY = 0
+        let mutable componentWidth = 0
+        let mutable componentHeight = 0
+        let clearComponent (source: float32[]) =
+            for y = componentY to componentY+componentHeight-1 do
+                Array.fill source ((y*width+componentX)*5) (componentWidth*5) 0.0f
+        let unpack (source: float32[]) (r: RasterRect) fourth =
+            for y = 0 to r.Height-1 do
+                for x = 0 to r.Width-1 do
+                    let v = pixelAt r.Pixels (y*r.Width+x)
+                    if v <> 0u then
+                        let px, py = r.X+x, r.Y+y
+                        let right = max (componentX+componentWidth) (px+1)
+                        let bottom = max (componentY+componentHeight) (py+1)
+                        componentX <- min componentX px
+                        componentY <- min componentY py
+                        componentWidth <- right-componentX
+                        componentHeight <- bottom-componentY
+                        let i = (py*width+px)*5
+                        if fourth then setPixel source (i+3) (float32 (Pixel.r v)/255.0f)
+                        else
+                            setPixel source i (float32 (Pixel.r v)/255.0f)
+                            setPixel source (i+1) (float32 (Pixel.g v)/255.0f)
+                            setPixel source (i+2) (float32 (Pixel.b v)/255.0f)
+                            setPixel source (i+4) (float32 (Pixel.a v)/255.0f)
+        let fullPixels (r: RasterRect) =
+            if r.X = 0 && r.Y = 0 && r.Width = width && r.Height = height then r.Pixels
+            else
+                let result = Array.zeroCreate<uint32> n
+                for y = 0 to r.Height-1 do
+                    Array.blit r.Pixels (y*r.Width) result ((r.Y+y)*width+r.X) r.Width
+                result
         let track (target: float32[] option) (source: float32[]) =
             match target with
             | None -> ()
@@ -136,7 +202,59 @@ module ComponentCompositor =
                     let i = p*5+4
                     let a = get source i
                     alpha.[i] <- float32 (a + get alpha i * (1.0-a))
-        let rec run (dest: float32[]) count complement wrap command alphaOut =
+        let rec run (dest: float32[]) count complement wrap command (alphaOut: float32[] option) =
+            let root = firstCommand
+            firstCommand <- false
+            let isGroup =
+                match command with
+                | ColorManagedGroup4 _ | ColorManagedGroup _ | TransparencyGroup _
+                | Mask _ | Blend _ -> true
+                | Group (_, opacity, _) when opacity < 1.0 -> true
+                | _ -> false
+            let b = if isGroup && (allowRootBounds || not root) then bounds [wrap command] else { X = 0; Y = 0; Width = width; Height = height }
+            if b.X < 0 || b.Y < 0 || b.Width < 0 || b.Height < 0 ||
+               b.X > width || b.Y > height || b.Width > width-b.X || b.Height > height-b.Y then
+                invalidArg "bounds" "Incorrect bounds rectangle"
+            if isGroup && (b.Width <> width || b.Height <> height) then
+                if b.Width > 0 && b.Height > 0 then
+                    let local = Array.zeroCreate<float32> (b.Width*b.Height*5)
+                    for y = 0 to b.Height-1 do
+                        Array.blit dest (((b.Y+y)*width+b.X)*5) local (y*b.Width*5) (b.Width*5)
+                    let intersect x y w h =
+                        let x0, y0 = min (b.X+b.Width) (max b.X x), min (b.Y+b.Height) (max b.Y y)
+                        let x1, y1 = min (b.X+b.Width) (x+w), min (b.Y+b.Height) (y+h)
+                        x0, y0, max 0 (x1-x0), max 0 (y1-y0)
+                    let localRaster commands : RasterRect =
+                        let r = raster (commands |> List.map wrap)
+                        let x, y, w, h = intersect r.X r.Y r.Width r.Height
+                        let data =
+                            if x = r.X && y = r.Y && w = r.Width && h = r.Height then r.Pixels
+                            else
+                                let cropped = Array.zeroCreate<uint32> (w*h)
+                                if w > 0 then
+                                    for row = 0 to h-1 do
+                                        Array.blit r.Pixels ((y-r.Y+row)*r.Width+x-r.X) cropped (row*w) w
+                                cropped
+                        { RasterRect.X = x-b.X; Y = y-b.Y; Width = w; Height = h; Pixels = data }
+                    let localBounds commands : Bounds =
+                        let r = bounds (commands |> List.map wrap)
+                        let x, y, w, h = intersect r.X r.Y r.Width r.Height
+                        { Bounds.X = x-b.X; Y = y-b.Y; Width = w; Height = h }
+                    let localAlpha = alphaOut |> Option.map (fun _ -> Array.zeroCreate<float32> local.Length)
+                    let result = renderCore b.Width b.Height local localRaster localBounds count complement command localAlpha false
+                    for y = 0 to b.Height-1 do
+                        Array.blit result (y*b.Width*5) dest (((b.Y+y)*width+b.X)*5) (b.Width*5)
+                    match alphaOut, localAlpha with
+                    | Some target, Some source ->
+                        for y = 0 to b.Height-1 do
+                            for x = 0 to b.Width-1 do
+                                let si = (y*b.Width+x)*5+4
+                                let di = ((b.Y+y)*width+b.X+x)*5+4
+                                let a = get source si
+                                target.[di] <- float32 (a + get target di * (1.0-a))
+                    | _ -> ()
+            else runUnbounded dest count complement wrap command alphaOut
+        and runUnbounded (dest: float32[]) count complement wrap command alphaOut =
             match command with
             | ColorManagedGroup4 (conv, isolated, knockout, opacity, mode, mask, children) ->
                 group dest count complement wrap conv.GroupComponents conv.Complement (Some conv.ToGroup) (Some conv.ToParent) isolated knockout opacity mode mask children alphaOut
@@ -168,13 +286,12 @@ module ComponentCompositor =
             match command with
             | Components4 (first, fourth) ->
                 let a, k = rasterOne wrap first, rasterOne wrap fourth
-                for p = 0 to n-1 do
-                    let i, v = p*5, a.[p]
-                    source.[i] <- float32 (Pixel.r v)/255.0f
-                    source.[i+1] <- float32 (Pixel.g v)/255.0f
-                    source.[i+2] <- float32 (Pixel.b v)/255.0f
-                    source.[i+3] <- float32 (Pixel.r k.[p])/255.0f
-                    source.[i+4] <- float32 (Pixel.a v)/255.0f
+                componentX <- width
+                componentY <- height
+                componentWidth <- -width
+                componentHeight <- -height
+                unpack source a false
+                unpack source k true
             | WithShape (_, children) -> for child in children do run source count complement wrap child None
             | Blend (mode, children) ->
                 for child in children do
@@ -184,13 +301,7 @@ module ComponentCompositor =
             | ColorManagedGroup4 _ | ColorManagedGroup _ | TransparencyGroup _ | Group _ | Clip _ | AntiAlias _ | SaveRestore _ | Mask _ -> run source count complement wrap command None
             | _ ->
                 let px = rasterOne wrap command
-                for p = 0 to n-1 do
-                    let i, v = p*5, px.[p]
-                    source.[i] <- float32 (Pixel.r v)/255.0f
-                    source.[i+1] <- float32 (Pixel.g v)/255.0f
-                    source.[i+2] <- float32 (Pixel.b v)/255.0f
-                    source.[i+3] <- 0.0f
-                    source.[i+4] <- float32 (Pixel.a v)/255.0f
+                unpack source px false
         and group (dest: float32[]) parentCount parentComplement wrap groupCount groupComplement toGroup toParent isolated knockout opacity mode mask children alphaOut =
             if opacity > 0.0 && not children.IsEmpty then
                 let backdrop =
@@ -240,8 +351,28 @@ module ComponentCompositor =
                             | other -> Normal, other
                         let objMode, obj = stripBlend command
                         let nested = needsBackdrop obj
+                        let bounded =
+                            not knockout && not nested && objMode = Normal &&
+                            (match obj with Components4 _ -> true | _ -> false)
+                        // A nested object returns only contribution alpha in src.
+                        // Restrict the parent bookkeeping as well as the nested
+                        // surface itself, otherwise each small group still scans
+                        // the entire enclosing group.
+                        let nestedBounds =
+                            if nested && not knockout && objMode = Normal then
+                                let b = bounds [wrap obj]
+                                if b.X < 0 || b.Y < 0 || b.Width < 0 || b.Height < 0 ||
+                                   b.X > width || b.Y > height || b.Width > width-b.X || b.Height > height-b.Y then
+                                    invalidArg "bounds" "Incorrect bounds rectangle"
+                                Some b
+                            else None
                         if nested then
-                            for p = 0 to n-1 do src.[p*5+4] <- 0.0f
+                            match nestedBounds with
+                            | Some b ->
+                                for y = b.Y to b.Y+b.Height-1 do
+                                    for x = b.X to b.X+b.Width-1 do
+                                        src.[(y*width+x)*5+4] <- 0.0f
+                            | None -> for p = 0 to n-1 do src.[p*5+4] <- 0.0f
                         else
                             match obj with
                             | Components4 _ -> ()
@@ -250,7 +381,7 @@ module ComponentCompositor =
                                 Array.fill src 0 src.Length 0.0f
                             | _ -> ()
                             paint src groupCount groupComplement wrap obj
-                        let shape = if knockout then Some (rasterOne wrap (Cmd.shapeOf command)) else None
+                        let shape = if knockout then Some (fullPixels (rasterOne wrap (Cmd.shapeOf command))) else None
                         // Nested groups return their actual contribution alpha
                         // while rendering against the candidate backdrop.
                         let candidate =
@@ -278,20 +409,56 @@ module ComponentCompositor =
                                 if isolated then Array.fill candidate 0 candidate.Length 0.0f
                                 else Array.blit backdrop 0 candidate 0 candidate.Length
                             composite candidate src groupCount groupComplement objMode
+                        elif bounded then
+                            for y = componentY to componentY+componentHeight-1 do
+                                let first = y*width+componentX
+                                compositeNormalRange candidate src groupCount first (first+componentWidth-1)
                         else composite candidate src groupCount groupComplement objMode
-                        for p = 0 to n-1 do
-                            let i = p*5
-                            let sa = get src (i+4)
-                            match shape with
-                            | None -> ()
-                            | Some sh ->
+                        match shape with
+                        | None ->
+                            // With no knockout shape, a transparent source
+                            // leaves the already-clamped accumulated alpha
+                            // unchanged. Most object rasters are sparse.
+                            if bounded then
+                                for y = componentY to componentY+componentHeight-1 do
+                                    for x = componentX to componentX+componentWidth-1 do
+                                        let p = y*width+x
+                                        let sa = float (pixelAt src (p*5+4))
+                                        if sa <> 0.0 then
+                                            let old = float accumulated.[p]
+                                            accumulated.[p] <- float32 (clamp (sa+old*(1.0-sa)))
+                            elif nestedBounds.IsSome then
+                                let b = nestedBounds.Value
+                                for y = b.Y to b.Y+b.Height-1 do
+                                    for x = b.X to b.X+b.Width-1 do
+                                        let p = y*width+x
+                                        let sa = float (pixelAt src (p*5+4))
+                                        if sa <> 0.0 then
+                                            let old = float accumulated.[p]
+                                            accumulated.[p] <- float32 (clamp (sa+old*(1.0-sa)))
+                            else
+                                for p = 0 to n-1 do
+                                    let sa = float (pixelAt src (p*5+4))
+                                    if sa <> 0.0 then
+                                        let old = float accumulated.[p]
+                                        accumulated.[p] <- float32 (clamp (sa+old*(1.0-sa)))
+                        | Some sh ->
+                            for p = 0 to n-1 do
+                                let i = p*5
+                                let sa = get src (i+4)
                                 let inv = 1.0-alphaOf sh.[p]
                                 for c = 0 to 4 do
                                     let b = if isolated then 0.0 else get backdrop (i+c)
                                     put current (i+c) (get candidate (i+c)+(get current (i+c)-b)*inv)
-                            let old = float accumulated.[p]
-                            let inv = match shape with Some sh -> 1.0-alphaOf sh.[p] | None -> 1.0-sa
-                            accumulated.[p] <- float32 (clamp (sa+old*inv))
+                                let old = float accumulated.[p]
+                                accumulated.[p] <- float32 (clamp (sa+old*inv))
+                        if bounded then clearComponent src
+                        else
+                            match nestedBounds with
+                            | Some b ->
+                                for y = b.Y to b.Y+b.Height-1 do
+                                    Array.fill src ((y*width+b.X)*5) (b.Width*5) 0.0f
+                            | None -> Array.fill src 0 src.Length 0.0f
                 for child in children do objects wrap child
                 let contribution = current
                 for p = 0 to n-1 do
@@ -313,26 +480,25 @@ module ComponentCompositor =
                         for c = 0 to 4 do contribution.[i+c] <- contribution.[i+c] * float32 factor
                 track alphaOut contribution
                 composite dest contribution parentCount parentComplement mode
-        let surface = fromPixels pixels
-        run surface count complement id command None
+        run surface count complement id command alphaOut
         surface
 
     /// Composite a component-managed group over premultiplied BGRA pixels.
-    let render width height (pixels: uint32[]) raster command =
+    let render width height (pixels: uint32[]) raster bounds command =
         match command with
         | ColorManagedGroup4 _ -> ()
         | _ -> invalidArg "command" "Expected a component-managed group"
-        let surface = renderCore width height pixels raster 3 false command
+        let surface = renderCore width height (fromPixels pixels) raster bounds 3 false command None true
         for p = 0 to pixels.Length-1 do
             let i = p*5
             pixels.[p] <- Pixel.pack (toByte surface (i+2)) (toByte surface (i+1)) (toByte surface i) (toByte surface (i+4))
 
     /// Render into a transparent four-component surface. Both returned BGRA
     /// planes are premultiplied and share alpha; the second is grayscale K.
-    let renderComponents width height raster complement commands =
+    let renderComponents width height raster bounds complement commands =
         let pixels = Array.zeroCreate<uint32> (width*height)
         let command = TransparencyGroup (true, false, 1.0, Normal, None, commands)
-        let surface = renderCore width height pixels raster 4 complement command
+        let surface = renderCore width height (fromPixels pixels) raster bounds 4 complement command None true
         let fourth = Array.zeroCreate<uint32> pixels.Length
         for p = 0 to pixels.Length-1 do
             let i = p*5
